@@ -1,0 +1,82 @@
+# Aurum AI Engine
+
+Automated multi-strategy trading orchestrator built on FastAPI, MetaApi Cloud SDK, and Supabase.
+
+This repository is being built in phases. **Current phase: 2.1 — skeleton + connectivity layer.**
+Subsequent phases (2.2–2.5) will introduce strategy execution, risk control, product routing, scheduling, and the token bridge.
+
+## Stack
+
+- Python 3.12
+- FastAPI + uvicorn
+- metaapi-cloud-sdk (master account connectivity)
+- supabase-py (service-role client)
+- pydantic-settings (typed env loading)
+- loguru (structured logging)
+- Deploy target: Railway (region `europe-west4`)
+
+## Quickstart
+
+### Using `uv` (recommended)
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install -e ".[dev]"
+cp .env.example .env  # then fill in secrets
+uvicorn src.main:app --reload
+```
+
+### Using `pip`
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+cp .env.example .env  # then fill in secrets
+uvicorn src.main:app --reload
+```
+
+### Run tests
+
+```bash
+pytest -q
+```
+
+## Environment variables
+
+| Variable | Description |
+|---|---|
+| `SUPABASE_URL` | Supabase project URL |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service-role API key (server-side only) |
+| `METAAPI_TOKEN` | MetaApi Cloud SDK auth token |
+| `METAAPI_MASTER_ACCOUNT_ID` | MetaApi master account UUID |
+| `APP_ENV` | `production` / `staging` / `development` |
+| `PORT` | HTTP port (Railway provides this) |
+| `TIMEZONE` | IANA timezone (default `Asia/Bangkok`) |
+| `LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+
+See `.env.example` for a template.
+
+## Health check
+
+`GET /health` returns the connectivity status of MetaApi and Supabase:
+
+```json
+{
+  "status": "ok",
+  "metaapi_connected": true,
+  "supabase_connected": true,
+  "version": "0.1.0"
+}
+```
+
+## Phase plan
+
+| Phase | Scope |
+|---|---|
+| 2.1 | Skeleton + connectivity layer (**this phase**) |
+| 2.2 | Strategy engine |
+| 2.3 | Risk control |
+| 2.4 | Products + routing |
+| 2.5 | Scheduler + token bridge |
