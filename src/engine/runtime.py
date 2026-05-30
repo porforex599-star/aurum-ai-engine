@@ -41,7 +41,26 @@ class AppRuntime:
         self.products: dict[str, Any] = {}
         self.last_tick: datetime | None = None
         self.last_tick_status: str | None = None
+        self._rpc_conn: Any = None
         self._init_products()
+
+    async def get_rpc_connection(self) -> Any:
+        """Lazy-init the RPC connection used for symbol metadata + spec queries."""
+        if self._rpc_conn is not None:
+            return self._rpc_conn
+        if self.account is None or not hasattr(self.account, "get_rpc_connection"):
+            raise RuntimeError("MetatraderAccount not available for RPC connection")
+        conn = self.account.get_rpc_connection()
+        try:
+            await conn.connect()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            await conn.wait_synchronized(timeout_in_seconds=30)
+        except Exception:  # noqa: BLE001
+            pass
+        self._rpc_conn = conn
+        return conn
 
     def _init_products(self) -> None:
         if self.settings.enable_gold_ai:
