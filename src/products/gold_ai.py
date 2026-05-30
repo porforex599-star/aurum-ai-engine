@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, time
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -25,9 +26,12 @@ class GoldAIProduct:
         customer_id: str,
         week_cycle_id: str,
         filters: list[Callable[[], FilterResult]] | None = None,
+        symbol: str | None = None,
     ) -> None:
         self.customer_id = customer_id
         self.config = ProductConfig.gold_ai()
+        if symbol is not None:
+            self.config = replace(self.config, symbols=(symbol,))
         self.day_tracker = DayTracker(self.config.risk_params)
         self.week_tracker = WeekTracker(
             week_cycle_id, ProductCode.GOLD_AI, self.config.risk_params

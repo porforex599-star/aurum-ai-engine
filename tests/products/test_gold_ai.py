@@ -145,6 +145,17 @@ def test_evaluate_returns_trade_intent_when_signal_fires() -> None:
     assert result.side == SignalSide.BUY
 
 
+def test_symbol_override_propagates_to_config_and_intent() -> None:
+    g = GoldAIProduct("cust", "w1", symbol="XAUUSD.v")
+    assert g.config.symbols == ("XAUUSD.v",)
+    g.strategy.evaluate = lambda snap: _signal()  # type: ignore[assignment]
+    now = _bkk(2026, 1, 5, 10, 0)
+    result = g.evaluate(_empty_snap(), [], now)
+    assert result is not None
+    # TradeIntent should carry the broker-specific symbol
+    assert result.symbol == "XAUUSD.v"  # type: ignore[union-attr]
+
+
 def test_evaluate_returns_none_when_daily_loss_limit_hit() -> None:
     g = GoldAIProduct("cust", "w1")
     now = _bkk(2026, 1, 5, 10, 0)

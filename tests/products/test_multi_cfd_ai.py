@@ -107,6 +107,20 @@ def test_skips_already_open_symbols() -> None:
     assert [r.symbol for r in result] == ["GBPUSD"]
 
 
+def test_symbols_override_propagates_and_accepts_broker_codes() -> None:
+    p = MultiCfdAIProduct("cust", "w1", symbols=("EURUSD.v", "GBPUSD.v", "SP500.v"))
+    assert p.config.symbols == ("EURUSD.v", "GBPUSD.v", "SP500.v")
+    p.strategy.evaluate = lambda snap: _sig(SignalSide.BUY, 0.8)  # type: ignore[assignment]
+    snapshots = {
+        "EURUSD.v": _snap("EURUSD.v"),
+        "GBPUSD.v": _snap("GBPUSD.v"),
+        "EURUSD": _snap("EURUSD"),  # not in overridden config — should be skipped
+    }
+    result = p.evaluate(snapshots, [], _bkk(2026, 1, 5, 12, 0))
+    symbols_emitted = sorted(r.symbol for r in result)
+    assert symbols_emitted == ["EURUSD.v", "GBPUSD.v"]
+
+
 def test_returns_close_intents_on_week_target_hit() -> None:
     p = MultiCfdAIProduct("cust", "w1")
     p.week_tracker.record_pnl_delta(-80.0)  # below -70 → expired_loss

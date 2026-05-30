@@ -67,11 +67,13 @@ class AppRuntime:
             self.products["gold_ai"] = GoldAIProduct(
                 customer_id=self.settings.primary_customer_id,
                 week_cycle_id=str(uuid.uuid4()),
+                symbol=self.settings.gold_ai_symbol,
             )
         if self.settings.enable_multi_cfd_ai:
             self.products["multi_cfd_ai"] = MultiCfdAIProduct(
                 customer_id=self.settings.primary_customer_id,
                 week_cycle_id=str(uuid.uuid4()),
+                symbols=tuple(self.settings.multi_cfd_ai_symbols),
             )
 
 

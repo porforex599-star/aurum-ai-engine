@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, time
 from typing import Callable
 from zoneinfo import ZoneInfo
@@ -25,9 +26,12 @@ class MultiCfdAIProduct:
         customer_id: str,
         week_cycle_id: str,
         filters_by_symbol: dict[str, list[Callable[[], FilterResult]]] | None = None,
+        symbols: tuple[str, ...] | None = None,
     ) -> None:
         self.customer_id = customer_id
         self.config = ProductConfig.multi_cfd_ai()
+        if symbols is not None:
+            self.config = replace(self.config, symbols=tuple(symbols))
         self.day_tracker = DayTracker(self.config.risk_params)
         self.week_tracker = WeekTracker(
             week_cycle_id, ProductCode.MULTI_CFD_AI, self.config.risk_params
