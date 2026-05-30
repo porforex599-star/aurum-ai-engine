@@ -24,13 +24,11 @@ async def run_tick(runtime: AppRuntime) -> None:
             symbol = runtime.settings.gold_ai_symbol
             snap = await runtime.snapshot_fetcher.fetch(symbol)
             if snap is None:
-                runtime.intent_bus.publish(
-                    "gold_ai",
-                    "error",
-                    {"reason": "snapshot_fetch_failed", "symbol": symbol},
-                    dry_run,
-                    now,
-                )
+                payload = {"reason": "snapshot_fetch_failed", "symbol": symbol}
+                last_err = getattr(runtime.snapshot_fetcher, "_last_error", None)
+                if last_err:
+                    payload.update(last_err)
+                runtime.intent_bus.publish("gold_ai", "error", payload, dry_run, now)
             else:
                 result = gold.evaluate(snap, positions, now)
                 _publish_eval_result(runtime.intent_bus, "gold_ai", result, dry_run, now)
@@ -38,12 +36,26 @@ async def run_tick(runtime: AppRuntime) -> None:
         if "multi_cfd_ai" in runtime.products:
             mcfd = runtime.products["multi_cfd_ai"]
             symbols = runtime.settings.multi_cfd_ai_symbols
-            snapshots = {}
+            snapshots: dict = {}
+            failed_symbols: list[str] = []
             for s in symbols:
                 snap = await runtime.snapshot_fetcher.fetch(s)
                 if snap is not None:
                     snapshots[s] = snap
-            if snapshots:
+                else:
+                    failed_symbols.append(s)
+            if not snapshots:
+                payload = {
+                    "reason": "all_snapshots_failed",
+                    "symbols": list(symbols),
+                }
+                last_err = getattr(runtime.snapshot_fetcher, "_last_error", None)
+                if last_err:
+                    payload.update(last_err)
+                runtime.intent_bus.publish(
+                    "multi_cfd_ai", "error", payload, dry_run, now
+                )
+            else:
                 result = mcfd.evaluate(snapshots, positions, now)
                 _publish_eval_result(
                     runtime.intent_bus, "multi_cfd_ai", result, dry_run, now

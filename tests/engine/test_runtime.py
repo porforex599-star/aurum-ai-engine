@@ -23,14 +23,14 @@ def _settings(**overrides) -> Settings:
 
 def test_app_runtime_initializes_both_products_when_enabled() -> None:
     s = _settings(enable_gold_ai=True, enable_multi_cfd_ai=True)
-    rt = AppRuntime(s, MagicMock(), MagicMock())
+    rt = AppRuntime(s, MagicMock(), MagicMock(), MagicMock())
     assert "gold_ai" in rt.products
     assert "multi_cfd_ai" in rt.products
 
 
 def test_app_runtime_skips_disabled_products() -> None:
     s = _settings(enable_gold_ai=True, enable_multi_cfd_ai=False)
-    rt = AppRuntime(s, MagicMock(), MagicMock())
+    rt = AppRuntime(s, MagicMock(), MagicMock(), MagicMock())
     assert "gold_ai" in rt.products
     assert "multi_cfd_ai" not in rt.products
 
@@ -43,9 +43,18 @@ def test_get_runtime_raises_before_set() -> None:
 
 def test_set_and_get_runtime_roundtrip() -> None:
     s = _settings()
-    rt = AppRuntime(s, MagicMock(), MagicMock())
+    rt = AppRuntime(s, MagicMock(), MagicMock(), MagicMock())
     set_runtime(rt)
     try:
         assert get_runtime() is rt
     finally:
         set_runtime(None)
+
+
+def test_snapshot_fetcher_wired_with_account() -> None:
+    s = _settings()
+    account = MagicMock()
+    connection = MagicMock()
+    rt = AppRuntime(s, account, connection, MagicMock())
+    assert rt.snapshot_fetcher.account is account
+    assert rt.snapshot_fetcher.connection is connection

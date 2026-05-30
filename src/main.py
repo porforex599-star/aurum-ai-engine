@@ -51,7 +51,11 @@ async def lifespan(app: FastAPI):
 
     scheduler: AsyncIOScheduler | None = None
     try:
-        runtime = AppRuntime(settings, metaapi, supabase)
+        account = metaapi.get_account() if hasattr(metaapi, "get_account") else None
+        connection = (
+            metaapi.get_connection() if hasattr(metaapi, "get_connection") else None
+        )
+        runtime = AppRuntime(settings, account, connection, supabase)
         set_runtime(runtime)
 
         scheduler = AsyncIOScheduler(timezone="UTC")

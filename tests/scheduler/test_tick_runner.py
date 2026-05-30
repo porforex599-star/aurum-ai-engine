@@ -13,24 +13,35 @@ from src.strategy.models import MarketSnapshot, SetupName, SignalSide
 
 
 def _runtime(
-    *, gold_evaluate=None, mcfd_evaluate=None, positions=None, snapshot=None
+    *,
+    gold_evaluate=None,
+    mcfd_evaluate=None,
+    positions=None,
+    snapshot=None,
+    fetch_side_effect=None,
+    multi_symbols=None,
 ):
-    """Build a minimal runtime stand-in."""
     snap = snapshot or MarketSnapshot(
         symbol="XAUUSD", bars_m15=[], bars_h1=[], bars_h4=[]
     )
-    bus = IntentBus(buffer_size=50)
+    bus = IntentBus(buffer_size=100)
+    fetcher = SimpleNamespace(_last_error=None)
+    if fetch_side_effect is not None:
+        fetcher.fetch = AsyncMock(side_effect=fetch_side_effect)
+    else:
+        fetcher.fetch = AsyncMock(return_value=snap)
+
     rt = SimpleNamespace(
         settings=SimpleNamespace(
             dry_run=True,
             gold_ai_symbol="XAUUSD",
-            multi_cfd_ai_symbols=["EURUSD"],
+            multi_cfd_ai_symbols=multi_symbols or ["EURUSD"],
         ),
         intent_bus=bus,
         position_poller=SimpleNamespace(
             fetch_all=AsyncMock(return_value=positions or [])
         ),
-        snapshot_fetcher=SimpleNamespace(fetch=AsyncMock(return_value=snap)),
+        snapshot_fetcher=fetcher,
         position_manager=MagicMock(evaluate_all=MagicMock(return_value=[])),
         products={},
         last_tick=None,
@@ -104,3 +115,38 @@ async def test_run_tick_sets_error_status_on_exception() -> None:
     await run_tick(rt)
     assert rt.last_tick_status is not None
     assert rt.last_tick_status.startswith("error")
+
+
+@pytest.mark.asyncio
+async def test_run_tick_snapshot_failure_includes_exc_info() -> None:
+    rt = _runtime(gold_evaluate=lambda *a, **k: None, fetch_side_effect=None)
+    rt.snapshot_fetcher.fetch = AsyncMock(return_value=None)
+    rt.snapshot_fetcher._last_error = {
+        "exc_type": "AttributeError",
+        "exc_msg": "no such method",
+    }
+    await run_tick(rt)
+    items = rt.intent_bus.recent(50)
+    err = next(i for i in items if i.product == "gold_ai" and i.kind == "error")
+    assert err.payload["exc_type"] == "AttributeError"
+    assert err.payload["exc_msg"] == "no such method"
+    assert err.payload["symbol"] == "XAUUSD"
+
+
+@pytest.mark.asyncio
+async def test_multi_cfd_all_snapshots_failed_publishes_summary_error() -> None:
+    rt = _runtime(
+        mcfd_evaluate=lambda *a, **k: [],
+        multi_symbols=["EURUSD", "GBPUSD"],
+    )
+    # gold_ai not registered (no gold_evaluate)
+    rt.snapshot_fetcher.fetch = AsyncMock(return_value=None)
+    rt.snapshot_fetcher._last_error = {"exc_type": "RuntimeError", "exc_msg": "x"}
+    await run_tick(rt)
+    items = rt.intent_bus.recent(50)
+    err = next(
+        i for i in items if i.product == "multi_cfd_ai" and i.kind == "error"
+    )
+    assert err.payload["reason"] == "all_snapshots_failed"
+    assert err.payload["symbols"] == ["EURUSD", "GBPUSD"]
+    assert err.payload["exc_type"] == "RuntimeError"

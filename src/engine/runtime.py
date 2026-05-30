@@ -18,18 +18,19 @@ class AppRuntime:
     def __init__(
         self,
         settings: Settings,
-        metaapi_connection: Any,
+        account: Any,
+        connection: Any,
         supabase_client: Any,
     ) -> None:
         self.settings = settings
-        self.metaapi = metaapi_connection
+        self.account = account
+        self.connection = connection
         self.supabase = supabase_client
         self.intent_bus = IntentBus(buffer_size=settings.intent_buffer_size)
-        self.snapshot_fetcher = SnapshotFetcher(metaapi_connection)
-        self.position_poller = PositionPoller(metaapi_connection)
+        self.snapshot_fetcher = SnapshotFetcher(account=account, connection=connection)
+        self.position_poller = PositionPoller(connection)
         self.position_manager = PositionManager()
 
-        # TokenService needs the raw supabase client.
         sb_raw = (
             supabase_client.get_client()
             if hasattr(supabase_client, "get_client")
