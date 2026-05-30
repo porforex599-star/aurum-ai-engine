@@ -23,6 +23,18 @@ class Settings(BaseSettings):
     TIMEZONE: str = "Asia/Bangkok"
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
+    # Phase 2.5a runtime config
+    dry_run: bool = Field(default=True)
+    tick_interval_seconds: int = Field(default=60)
+    primary_customer_id: str = Field(default="b1798c54-2665-4b85-9a2b-25f07231f8b0")
+    gold_ai_symbol: str = Field(default="XAUUSD")
+    multi_cfd_ai_symbols: list[str] = Field(
+        default_factory=lambda: ["EURUSD", "GBPUSD", "USDJPY", "US500", "NAS100", "GER40"]
+    )
+    enable_gold_ai: bool = Field(default=True)
+    enable_multi_cfd_ai: bool = Field(default=True)
+    intent_buffer_size: int = Field(default=100)
+
 
 _settings: Settings | None = None
 
@@ -32,3 +44,8 @@ def get_settings() -> Settings:
     if _settings is None:
         _settings = Settings()
     return _settings
+
+
+def reset_settings() -> None:
+    global _settings
+    _settings = None
