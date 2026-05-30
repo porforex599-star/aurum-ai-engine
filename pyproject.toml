@@ -2,7 +2,6 @@
 name = "aurum-ai-engine"
 version = "0.1.0"
 description = "Aurum AI Engine — automated multi-strategy trading orchestrator (Phase 2.1 skeleton)"
-readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115.0",
