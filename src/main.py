@@ -15,6 +15,7 @@ from src.api.intents import router as intents_router
 from src.api.positions import router as positions_router
 from src.api.status import router as status_router
 from src.api.symbols import router as symbols_router
+from src.api.test_trade import router as test_trade_router
 from src.config import get_settings
 from src.core.metaapi_client import get_metaapi_client
 from src.core.supabase_client import get_supabase_client
@@ -103,3 +104,4 @@ app.include_router(status_router)
 app.include_router(positions_router)
 app.include_router(intents_router)
 app.include_router(symbols_router)
+app.include_router(test_trade_router)
