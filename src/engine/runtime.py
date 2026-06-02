@@ -5,7 +5,9 @@ from datetime import datetime
 from typing import Any
 
 from src.config import Settings
+from src.engine.close_detector import CloseDetector
 from src.engine.intent_bus import IntentBus
+from src.engine.order_executor import OrderExecutor
 from src.engine.position_poller import PositionPoller
 from src.engine.snapshot_fetcher import SnapshotFetcher
 from src.products.gold_ai import GoldAIProduct
@@ -30,6 +32,8 @@ class AppRuntime:
         self.snapshot_fetcher = SnapshotFetcher(account=account, connection=connection)
         self.position_poller = PositionPoller(connection)
         self.position_manager = PositionManager()
+        self.order_executor = OrderExecutor(self.get_rpc_connection)
+        self.close_detector = CloseDetector(self.get_rpc_connection)
 
         sb_raw = (
             supabase_client.get_client()
