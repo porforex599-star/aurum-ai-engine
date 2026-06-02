@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from loguru import logger
 
 from src import __version__
+from src.api.admin import router as admin_router
 from src.api.health import router as health_router
 from src.api.intents import router as intents_router
 from src.api.positions import router as positions_router
@@ -105,3 +106,4 @@ app.include_router(positions_router)
 app.include_router(intents_router)
 app.include_router(symbols_router)
 app.include_router(test_trade_router)
+app.include_router(admin_router)

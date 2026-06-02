@@ -94,3 +94,22 @@ def test_runtime_disables_notifier_when_token_blank_even_if_flag_on() -> None:
     rt = AppRuntime(s, MagicMock(), MagicMock(), MagicMock())
     assert rt.notifier.enabled is False
     assert rt.intent_bus._notifier is None  # type: ignore[attr-defined]
+
+
+# ---------- Phase 6 — freeze manager wiring ----------
+
+
+def test_runtime_builds_freeze_manager() -> None:
+    s = _settings()
+    rt = AppRuntime(s, MagicMock(), MagicMock(), MagicMock())
+    assert rt.freeze_manager is not None
+    # TTL flows through from settings.
+    assert rt.freeze_manager._ttl == s.freeze_cache_ttl_seconds  # type: ignore[attr-defined]
+
+
+def test_runtime_freeze_manager_uses_supabase_client() -> None:
+    """The FreezeManager must hold the same supabase reference as the rest of the runtime."""
+    s = _settings()
+    sb = MagicMock()
+    rt = AppRuntime(s, MagicMock(), MagicMock(), sb)
+    assert rt.freeze_manager._sb is sb  # type: ignore[attr-defined]

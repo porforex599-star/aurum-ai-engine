@@ -41,6 +41,10 @@ _KIND_EMOJI: dict[str, str] = {
     "trade_closed_dryrun": "💭",
     "error": "❌",
     "friday_close": "🗓️",
+    # Phase 6 — freeze state
+    "frozen": "🧊",
+    "unfrozen": "🟩",
+    "frozen_skip": "⏸️",
 }
 
 # Kinds we never forward to Telegram — per-tick "no signal" noise plus
@@ -173,6 +177,29 @@ def format_message(entry: IntentLogEntry) -> str:
     elif entry.kind == "friday_close":
         count = p.get("expired_count", "?")
         lines.append(f"expired_tokens={_esc(count)}")
+
+    elif entry.kind == "frozen":
+        reason = p.get("reason")
+        by = p.get("by")
+        lines.append("⚠️ <b>Engine frozen — no new opens</b>")
+        if reason:
+            lines.append(f"reason: {_esc(reason)}")
+        if by:
+            lines.append(f"by: {_esc(by)}")
+
+    elif entry.kind == "unfrozen":
+        lines.append("✅ <b>Engine unfrozen — opens resumed</b>")
+
+    elif entry.kind == "frozen_skip":
+        symbol = p.get("symbol", "?")
+        side = str(p.get("side", "")).upper()
+        lot = p.get("lot", "?")
+        lines.append(
+            f"skipped <code>{_esc(symbol)} {_esc(side)} {_esc(lot)}</code>"
+        )
+        setup = p.get("setup")
+        if setup:
+            lines.append(f"setup={_esc(setup)}")
 
     else:
         # Unknown kind — dump a compact payload preview.

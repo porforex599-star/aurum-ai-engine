@@ -6,6 +6,7 @@ from typing import Any
 
 from src.config import Settings
 from src.engine.close_detector import CloseDetector
+from src.engine.freeze_manager import FreezeManager
 from src.engine.intent_bus import IntentBus
 from src.engine.order_executor import OrderExecutor
 from src.engine.position_poller import PositionPoller
@@ -37,6 +38,10 @@ class AppRuntime:
         self.intent_bus = IntentBus(
             buffer_size=settings.intent_buffer_size,
             notifier=self.notifier if self.notifier.enabled else None,
+        )
+        self.freeze_manager = FreezeManager(
+            supabase_client=supabase_client,
+            cache_ttl_seconds=settings.freeze_cache_ttl_seconds,
         )
         self.snapshot_fetcher = SnapshotFetcher(account=account, connection=connection)
         self.position_poller = PositionPoller(connection)

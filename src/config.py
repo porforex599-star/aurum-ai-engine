@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str = Field(default="")
     telegram_chat_id: str = Field(default="")
 
+    # Phase 6 — freeze/unfreeze
+    admin_key: str = Field(default="")
+    freeze_cache_ttl_seconds: float = Field(default=30.0)
+
 
 _settings: Settings | None = None
 

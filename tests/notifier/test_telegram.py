@@ -288,3 +288,52 @@ def test_format_unknown_kind_dumps_payload_preview() -> None:
     assert "brand_new_kind" in msg
     assert "a=1" in msg
     assert "b=two" in msg
+
+
+# ---------- Phase 6 — freeze/unfreeze formatting ----------
+
+
+def test_format_frozen_renders_reason_and_by() -> None:
+    e = _entry(
+        "frozen",
+        product="freeze_manager",
+        payload={"reason": "manual_kill", "by": "por"},
+    )
+    msg = format_message(e)
+    assert "🧊" in msg
+    assert "Engine frozen" in msg
+    assert "manual_kill" in msg
+    assert "por" in msg
+
+
+def test_format_unfrozen_renders_banner() -> None:
+    e = _entry("unfrozen", product="freeze_manager", payload={})
+    msg = format_message(e)
+    assert "Engine unfrozen" in msg
+
+
+def test_format_frozen_skip_renders_trade_details() -> None:
+    e = _entry(
+        "frozen_skip",
+        product="gold_ai",
+        payload={
+            "symbol": "XAUUSD.v",
+            "side": "buy",
+            "lot": 0.03,
+            "setup": "order_block",
+            "reason": "engine_frozen",
+        },
+    )
+    msg = format_message(e)
+    assert "⏸️" in msg
+    assert "XAUUSD.v" in msg
+    assert "BUY" in msg
+    assert "order_block" in msg
+
+
+def test_default_skip_does_not_filter_freeze_kinds() -> None:
+    """frozen / unfrozen / frozen_skip must reach Telegram (not in skip set)."""
+    n = TelegramNotifier(token="t", chat_id="123", enabled=True)
+    assert n.should_send(_entry("frozen")) is True
+    assert n.should_send(_entry("unfrozen")) is True
+    assert n.should_send(_entry("frozen_skip")) is True

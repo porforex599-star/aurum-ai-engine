@@ -5,7 +5,7 @@ from typing import Any
 
 from loguru import logger
 
-from src.engine.intent_bus import IntentBus, serialize_intent
+from src.engine.intent_bus import serialize_intent
 from src.engine.runtime import AppRuntime
 from src.products.models import CloseIntent, TradeIntent
 from src.risk.models import RiskParams
@@ -178,7 +178,25 @@ async def _handle_eval_result(
         bus.publish(product, "none", {"reason": "no_signal"}, dry_run, now)
         return
 
+    # Phase 6 — when frozen, swallow NEW opens but let closes through.
+    # is_frozen() is cached for ~30s; never raises (returns False on failure).
+    try:
+        frozen = await runtime.freeze_manager.is_frozen()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("freeze check raised (defaulting to unfrozen): {}", exc)
+        frozen = False
+
     for item in items:
+        if frozen and isinstance(item, TradeIntent):
+            bus.publish(
+                product,
+                "frozen_skip",
+                {**serialize_intent(item), "reason": "engine_frozen"},
+                dry_run,
+                now,
+            )
+            continue
+
         if dry_run:
             kind = "close" if isinstance(item, CloseIntent) else "open"
             bus.publish(product, kind, serialize_intent(item), dry_run, now)
