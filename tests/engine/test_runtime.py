@@ -58,3 +58,39 @@ def test_snapshot_fetcher_wired_with_account() -> None:
     rt = AppRuntime(s, account, connection, MagicMock())
     assert rt.snapshot_fetcher.account is account
     assert rt.snapshot_fetcher.connection is connection
+
+
+# ---------- Phase 2.6 — notifier wiring ----------
+
+
+def test_runtime_builds_disabled_notifier_when_telegram_off() -> None:
+    s = _settings(telegram_enabled=False)
+    rt = AppRuntime(s, MagicMock(), MagicMock(), MagicMock())
+    assert rt.notifier is not None
+    assert rt.notifier.enabled is False
+    # Bus should NOT have a notifier attached when disabled — avoids any
+    # accidental dispatch when token/chat are blank in dev.
+    assert rt.intent_bus._notifier is None  # type: ignore[attr-defined]
+
+
+def test_runtime_attaches_notifier_when_telegram_enabled() -> None:
+    s = _settings(
+        telegram_enabled=True,
+        telegram_bot_token="111:abc",
+        telegram_chat_id="555",
+    )
+    rt = AppRuntime(s, MagicMock(), MagicMock(), MagicMock())
+    assert rt.notifier.enabled is True
+    assert rt.intent_bus._notifier is rt.notifier  # type: ignore[attr-defined]
+
+
+def test_runtime_disables_notifier_when_token_blank_even_if_flag_on() -> None:
+    """Defence in depth — telegram_enabled=True but no token should NOT wire."""
+    s = _settings(
+        telegram_enabled=True,
+        telegram_bot_token="",
+        telegram_chat_id="555",
+    )
+    rt = AppRuntime(s, MagicMock(), MagicMock(), MagicMock())
+    assert rt.notifier.enabled is False
+    assert rt.intent_bus._notifier is None  # type: ignore[attr-defined]

@@ -10,6 +10,7 @@ from src.engine.intent_bus import IntentBus
 from src.engine.order_executor import OrderExecutor
 from src.engine.position_poller import PositionPoller
 from src.engine.snapshot_fetcher import SnapshotFetcher
+from src.notifier.telegram import TelegramNotifier
 from src.products.gold_ai import GoldAIProduct
 from src.products.multi_cfd_ai import MultiCfdAIProduct
 from src.products.position_manager import PositionManager
@@ -28,7 +29,15 @@ class AppRuntime:
         self.account = account
         self.connection = connection
         self.supabase = supabase_client
-        self.intent_bus = IntentBus(buffer_size=settings.intent_buffer_size)
+        self.notifier = TelegramNotifier(
+            token=settings.telegram_bot_token,
+            chat_id=settings.telegram_chat_id,
+            enabled=settings.telegram_enabled,
+        )
+        self.intent_bus = IntentBus(
+            buffer_size=settings.intent_buffer_size,
+            notifier=self.notifier if self.notifier.enabled else None,
+        )
         self.snapshot_fetcher = SnapshotFetcher(account=account, connection=connection)
         self.position_poller = PositionPoller(connection)
         self.position_manager = PositionManager()

@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     enable_multi_cfd_ai: bool = Field(default=True)
     intent_buffer_size: int = Field(default=100)
 
+    # Phase 2.6 — Telegram notifications
+    telegram_enabled: bool = Field(default=False)
+    telegram_bot_token: str = Field(default="")
+    telegram_chat_id: str = Field(default="")
+
 
 _settings: Settings | None = None
 
