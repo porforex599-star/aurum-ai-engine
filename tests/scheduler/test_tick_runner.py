@@ -8,6 +8,7 @@ import pytest
 
 from src.engine.intent_bus import IntentBus
 from src.engine.order_executor import OpenOutcome
+from src.engine.signal_lock import SignalLock
 from src.products.models import CloseIntent, IntentKind, TradeIntent
 from src.scheduler.tick_runner import run_tick
 from src.strategy.models import MarketSnapshot, SetupName, SignalSide
@@ -73,6 +74,7 @@ def _runtime(
         order_executor=order_executor,
         close_detector=close_detector or _close_detector(),
         token_service=token_service,
+        signal_lock=SignalLock(cooldown_seconds=300.0),
         products={},
         last_tick=None,
         last_tick_status=None,
@@ -213,6 +215,51 @@ async def test_live_trade_intent_executes_open_and_publishes_executed() -> None:
     ]
     assert len(executed) == 1
     assert executed[0].payload["order_id"] == "ORD-123"
+
+
+@pytest.mark.asyncio
+async def test_live_open_locks_symbol_against_duplicate_next_tick() -> None:
+    """Bug 1 regression: a repeating signal must open once, then be skipped
+    while the position is held — even if the position feed hasn't caught up."""
+    rt = _runtime(gold_evaluate=lambda *a, **k: _trade_intent(), dry_run=False)
+    rt.order_executor.execute_open_with_padding = AsyncMock(
+        return_value=OpenOutcome(
+            status="executed",
+            result={"order_id": "ORD-1", "position_id": "POS-1"},
+        )
+    )
+
+    # Tick 1 — opens.
+    await run_tick(rt)
+    # Tick 2 — same signal, position feed still empty (positions=[]).
+    await run_tick(rt)
+
+    assert rt.order_executor.execute_open_with_padding.await_count == 1
+    items = rt.intent_bus.recent(50)
+    executed = [i for i in items if i.kind == "open_executed"]
+    locked = [i for i in items if i.kind == "signal_skipped_position_locked"]
+    assert len(executed) == 1
+    assert len(locked) == 1
+    assert locked[0].payload["reason"] == "position_already_open"
+    assert locked[0].payload["existing_position_id"] == "POS-1"
+
+
+@pytest.mark.asyncio
+async def test_padding_unavailable_publishes_skip_not_open_failed() -> None:
+    """Bug 2 regression: padding-unavailable surfaces a categorized skip, not
+    an `open_failed ... Invalid stops`."""
+    rt = _runtime(gold_evaluate=lambda *a, **k: _trade_intent(), dry_run=False)
+    rt.order_executor.execute_open_with_padding = AsyncMock(
+        return_value=OpenOutcome(
+            status="skipped_padding_unavailable",
+            reason="padding_unavailable_price_fetch",
+            error={"exc_type": "RuntimeError", "exc_msg": "no price"},
+        )
+    )
+    await run_tick(rt)
+    items = rt.intent_bus.recent(50)
+    assert any(i.kind == "padding_unavailable_price_fetch" for i in items)
+    assert not any(i.kind == "open_failed" for i in items)
 
 
 @pytest.mark.asyncio

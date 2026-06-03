@@ -34,10 +34,14 @@ async def _handle_closes(runtime: AppRuntime, positions: list, dry_run: bool, no
         if deal is None:
             continue
         symbol = deal["symbol"]
-        product, _key, product_code = _resolve_product(runtime, symbol)
+        product, key, product_code = _resolve_product(runtime, symbol)
 
         if product is not None:
             product.record_trade_closed(deal["pnl"])
+
+        # Release the per-(product, symbol) open guard now that the position is
+        # gone. The signal cooldown (if any) is enforced separately.
+        runtime.signal_lock.release(key, symbol)
 
         if not dry_run:
             result = await runtime.token_service.add_trade(
@@ -215,11 +219,35 @@ async def _handle_eval_result(
                 now,
             )
         elif isinstance(item, TradeIntent):
+            # Per-(product, symbol) open guard + signal cooldown. Guards against
+            # the position-feed lag that let one setup fire as 8 stacked orders.
+            lock_reason = runtime.signal_lock.status(product, item.symbol, now)
+            if lock_reason is not None:
+                bus.publish(
+                    product,
+                    "signal_skipped_position_locked",
+                    {
+                        **serialize_intent(item),
+                        "reason": lock_reason,
+                        "existing_position_id": runtime.signal_lock.existing_position_id(
+                            product, item.symbol
+                        ),
+                    },
+                    dry_run,
+                    now,
+                )
+                continue
+
             outcome = await runtime.order_executor.execute_open_with_padding(item)
             if outcome.status == "executed":
                 payload = {**serialize_intent(item), **(outcome.result or {})}
                 if outcome.padding:
                     payload.update(outcome.padding)
+                # Lock immediately on a real fill — independent of the streaming
+                # position feed, which can trail this open by several ticks.
+                runtime.signal_lock.record_open(
+                    product, item.symbol, now, (outcome.result or {}).get("position_id")
+                )
                 bus.publish(product, "open_executed", payload, dry_run, now)
             elif outcome.status == "skipped_rr_too_low":
                 payload = {
@@ -228,6 +256,15 @@ async def _handle_eval_result(
                     "reason": outcome.reason or "rr_too_low",
                 }
                 bus.publish(product, "skipped_rr_too_low", payload, dry_run, now)
+            elif outcome.status == "skipped_padding_unavailable":
+                # Padding inputs missing → explicit skip, NOT a raw placement.
+                bus.publish(
+                    product,
+                    outcome.reason or "padding_unavailable",
+                    {**serialize_intent(item), **(outcome.error or {})},
+                    dry_run,
+                    now,
+                )
             else:
                 bus.publish(
                     product,

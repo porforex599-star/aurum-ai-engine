@@ -219,16 +219,30 @@ async def test_padding_falls_back_to_raw_without_spec_cache() -> None:
 
 
 @pytest.mark.asyncio
-async def test_padding_falls_back_to_raw_when_price_fetch_fails() -> None:
+async def test_padding_skips_when_price_fetch_fails() -> None:
     conn = _padding_conn()
     conn.get_symbol_price = AsyncMock(side_effect=RuntimeError("no price"))
     ex = OrderExecutor(_provider(conn), spec_cache=_spec_cache(conn))
     outcome = await ex.execute_open_with_padding(
         _buy_intent_with(sl=1.15995, tp=1.16500)
     )
-    assert outcome.status == "executed"
-    _, kwargs = conn.create_market_buy_order.call_args
-    assert kwargs["stop_loss"] == pytest.approx(1.15995)
+    # No raw placement — broker would just reject "Invalid stops" anyway.
+    assert outcome.status == "skipped_padding_unavailable"
+    assert outcome.reason == "padding_unavailable_price_fetch"
+    conn.create_market_buy_order.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_padding_skips_when_spec_fetch_fails() -> None:
+    conn = _padding_conn(ask=1.16000)
+    conn.get_symbol_specification = AsyncMock(side_effect=RuntimeError("no spec"))
+    ex = OrderExecutor(_provider(conn), spec_cache=_spec_cache(conn))
+    outcome = await ex.execute_open_with_padding(
+        _buy_intent_with(sl=1.15995, tp=1.16500)
+    )
+    assert outcome.status == "skipped_padding_unavailable"
+    assert outcome.reason == "padding_unavailable_spec_miss"
+    conn.create_market_buy_order.assert_not_called()
 
 
 @pytest.mark.asyncio

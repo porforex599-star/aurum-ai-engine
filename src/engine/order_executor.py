@@ -16,9 +16,17 @@ class OpenOutcome:
     """Result of a padding-aware open attempt.
 
     status:
-      - "executed"            → order placed; `result` holds order metadata.
-      - "skipped_rr_too_low"  → padding degraded R:R below the floor; not placed.
-      - "failed"              → placement/price/geometry error; `error` set.
+      - "executed"                   → order placed; `result` holds order metadata.
+      - "skipped_rr_too_low"         → padding degraded R:R below the floor; not placed.
+      - "skipped_padding_unavailable"→ the inputs padding needs (live price /
+                                        symbol spec) were unavailable, so the
+                                        order was NOT placed. `reason` carries the
+                                        specific cause. We deliberately do NOT
+                                        fall back to a raw placement: the broker
+                                        rejects raw stops with "Invalid stops"
+                                        anyway, so a raw fallback is both useless
+                                        and a silent bypass of the safety system.
+      - "failed"                     → placement/geometry error; `error` set.
     """
 
     status: str
@@ -103,8 +111,10 @@ class OrderExecutor:
         """Re-anchor SL/TP to the live price, pad to the broker minimum stop
         distance, enforce an R:R floor, then place the order.
 
-        Falls back to a raw placement (best-effort) if the live price or symbol
-        spec is unavailable — never worse than the pre-fix behavior."""
+        If the inputs padding requires (live price or symbol spec) are
+        unavailable, the order is SKIPPED rather than placed raw — a raw
+        placement just gets rejected by the broker ("Invalid stops") while
+        silently bypassing the safety system."""
         self._last_error = None
 
         # 1. Live price for re-anchoring (ask for BUY, bid for SELL).
@@ -112,12 +122,11 @@ class OrderExecutor:
             conn = await self._get_conn()
             price = await conn.get_symbol_price(symbol=intent.symbol)
         except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "padding: price fetch failed for {}, placing raw: {}",
-                intent.symbol,
-                e,
+            return self._padding_unavailable(
+                intent,
+                "padding_unavailable_price_fetch",
+                exc=e,
             )
-            return self._raw_outcome(await self.execute_open(intent))
 
         entry = (
             self._price_field(price, "ask")
@@ -125,33 +134,33 @@ class OrderExecutor:
             else self._price_field(price, "bid")
         )
         if entry <= 0:
-            logger.warning(
-                "padding: non-positive live price for {} (got {}), placing raw",
-                intent.symbol,
-                entry,
+            return self._padding_unavailable(
+                intent,
+                "padding_unavailable_price_fetch",
+                detail=f"non-positive live price ({entry})",
             )
-            return self._raw_outcome(await self.execute_open(intent))
 
-        # 2. Symbol spec (cached). No cache → no padding.
+        # 2. Symbol spec (cached). No cache configured → no padding possible.
+        #    Production always wires a SymbolSpecCache (see AppRuntime), so this
+        #    branch is only reachable in the manual/test path that opts out of
+        #    padding entirely; there we keep the raw placement.
         if self._spec_cache is None:
             return self._raw_outcome(await self.execute_open(intent))
         try:
             spec = await self._spec_cache.get(intent.symbol)
         except Exception as e:  # noqa: BLE001
-            logger.warning(
-                "padding: spec fetch failed for {}, placing raw: {}",
-                intent.symbol,
-                e,
+            return self._padding_unavailable(
+                intent,
+                "padding_unavailable_spec_miss",
+                exc=e,
             )
-            return self._raw_outcome(await self.execute_open(intent))
 
         if spec.point <= 0:
-            logger.warning(
-                "padding: invalid point ({}) for {}, placing raw",
-                spec.point,
-                intent.symbol,
+            return self._padding_unavailable(
+                intent,
+                "padding_unavailable_spec_miss",
+                detail=f"invalid point ({spec.point})",
             )
-            return self._raw_outcome(await self.execute_open(intent))
 
         # 3. Pad outward to the broker minimum stop distance.
         try:
@@ -227,6 +236,34 @@ class OrderExecutor:
         if result is None:
             return OpenOutcome(status="failed", error=self._last_error)
         return OpenOutcome(status="executed", result=result)
+
+    def _padding_unavailable(
+        self,
+        intent: TradeIntent,
+        reason: str,
+        exc: Exception | None = None,
+        detail: str | None = None,
+    ) -> OpenOutcome:
+        """Skip the open because padding inputs were unavailable. Never places
+        a raw order — surfaces a categorized skip so Telegram shows e.g.
+        `padding_unavailable_price_fetch` instead of `open_failed Invalid stops`."""
+        error: dict[str, str] = {}
+        if exc is not None:
+            error = {"exc_type": type(exc).__name__, "exc_msg": str(exc)[:300]}
+        elif detail is not None:
+            error = {"exc_msg": detail}
+        self._last_error = error or None
+        logger.warning(
+            "padding unavailable for {} ({}): {} — skipping (no raw placement)",
+            intent.symbol,
+            reason,
+            error.get("exc_msg", ""),
+        )
+        return OpenOutcome(
+            status="skipped_padding_unavailable",
+            reason=reason,
+            error=error or None,
+        )
 
     async def execute_close(self, intent: CloseIntent) -> bool:
         self._last_error = None

@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     min_padded_rr: float = Field(default=1.2)
     symbol_spec_cache_ttl_seconds: float = Field(default=300.0)
 
+    # Phase 2.6.3 — signal duplication guard. After any open for a
+    # (product, symbol), suppress new opens for that pair for this many
+    # seconds. Default 300s; override via env SIGNAL_COOLDOWN_SECONDS.
+    signal_cooldown_seconds: float = Field(default=300.0)
+
 
 _settings: Settings | None = None
 

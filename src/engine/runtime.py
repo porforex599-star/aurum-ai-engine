@@ -10,6 +10,7 @@ from src.engine.freeze_manager import FreezeManager
 from src.engine.intent_bus import IntentBus
 from src.engine.order_executor import OrderExecutor
 from src.engine.position_poller import PositionPoller
+from src.engine.signal_lock import SignalLock
 from src.engine.snapshot_fetcher import SnapshotFetcher
 from src.engine.symbol_spec_cache import SymbolSpecCache
 from src.notifier.telegram import TelegramNotifier
@@ -58,6 +59,9 @@ class AppRuntime:
             min_padded_rr=settings.min_padded_rr,
         )
         self.close_detector = CloseDetector(self.get_rpc_connection)
+        self.signal_lock = SignalLock(
+            cooldown_seconds=settings.signal_cooldown_seconds
+        )
 
         sb_raw = (
             supabase_client.get_client()

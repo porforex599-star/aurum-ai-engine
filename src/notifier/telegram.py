@@ -40,6 +40,11 @@ _KIND_EMOJI: dict[str, str] = {
     "trade_closed": "💰",
     "trade_closed_dryrun": "💭",
     "skipped_rr_too_low": "🚫",
+    # Phase 2.6.3 — signal-dedup + padding-unavailable skips
+    "signal_skipped_position_locked": "🔒",
+    "padding_unavailable_price_fetch": "🚧",
+    "padding_unavailable_spec_miss": "🚧",
+    "padding_unavailable_exception": "🚧",
     "error": "❌",
     "friday_close": "🗓️",
     # Phase 6 — freeze state
@@ -230,6 +235,31 @@ def format_message(entry: IntentLogEntry) -> str:
         setup = p.get("setup")
         if setup:
             lines.append(f"setup={_esc(setup)}")
+
+    elif entry.kind == "signal_skipped_position_locked":
+        symbol = p.get("symbol", "?")
+        side = str(p.get("side", "")).upper()
+        lot = p.get("lot", "?")
+        lines.append(f"{_esc(symbol)} {_esc(side)} {_esc(lot)} — skipped (locked)")
+        reason = p.get("reason")
+        if reason:
+            lines.append(f"reason={_esc(reason)}")
+        existing = p.get("existing_position_id")
+        if existing:
+            lines.append(f"open pos=<code>{_esc(existing)}</code>")
+
+    elif entry.kind in {
+        "padding_unavailable_price_fetch",
+        "padding_unavailable_spec_miss",
+        "padding_unavailable_exception",
+    }:
+        symbol = p.get("symbol", "?")
+        side = str(p.get("side", "")).upper()
+        lot = p.get("lot", "?")
+        lines.append(f"{_esc(symbol)} {_esc(side)} {_esc(lot)} — skipped (no padding)")
+        err = p.get("exc_msg") or p.get("exc_type")
+        if err:
+            lines.append(f"reason: {_esc(err)}")
 
     else:
         # Unknown kind — dump a compact payload preview.
