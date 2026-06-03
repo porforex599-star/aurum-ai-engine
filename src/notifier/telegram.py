@@ -51,6 +51,9 @@ _KIND_EMOJI: dict[str, str] = {
     "frozen": "🧊",
     "unfrozen": "🟩",
     "frozen_skip": "⏸️",
+    # Phase 6.4 — admin position controls
+    "admin_close_all": "🚨",
+    "admin_close_position": "🚨",
 }
 
 # Kinds we never forward to Telegram — per-tick "no signal" noise plus
@@ -260,6 +263,34 @@ def format_message(entry: IntentLogEntry) -> str:
         err = p.get("exc_msg") or p.get("exc_type")
         if err:
             lines.append(f"reason: {_esc(err)}")
+
+    elif entry.kind == "admin_close_all":
+        slug = p.get("slug", "?")
+        closed = p.get("positions_closed", 0)
+        failed = p.get("positions_failed", 0)
+        pnl = p.get("total_pnl")
+        lines.append(f"<b>close_all</b> {_esc(slug)}")
+        line = f"{_esc(closed)} closed"
+        if failed:
+            line += f", {_esc(failed)} failed"
+        if pnl is not None:
+            line += f" · PnL <b>{_fmt_pnl(pnl)}</b>"
+        lines.append(line)
+        if p.get("by"):
+            lines.append(f"by: {_esc(p['by'])}")
+
+    elif entry.kind == "admin_close_position":
+        slug = p.get("slug", "?")
+        pid = p.get("position_id", "?")
+        status = p.get("status", "?")
+        pnl = p.get("pnl")
+        lines.append(f"<b>close_position</b> {_esc(slug)}")
+        line = f"pos=<code>{_esc(pid)}</code> · {_esc(status)}"
+        if pnl is not None:
+            line += f" · PnL <b>{_fmt_pnl(pnl)}</b>"
+        lines.append(line)
+        if p.get("by"):
+            lines.append(f"by: {_esc(p['by'])}")
 
     else:
         # Unknown kind — dump a compact payload preview.

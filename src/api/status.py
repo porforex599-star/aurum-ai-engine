@@ -1,22 +1,51 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
+from loguru import logger
 
+from src.engine.master_account import is_product_position, public_position
 from src.engine.runtime import AppRuntime, get_runtime
 
 router = APIRouter(prefix="/status", tags=["status"])
 
 
+async def _master_snapshot(rt: AppRuntime):
+    """Cached master account + positions; never raises (returns empty on failure)."""
+    snap = getattr(rt, "account_snapshot", None)
+    if snap is None:
+        return None, []
+    try:
+        s = await snap.get()
+        return s.account, s.positions
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("status: master snapshot failed: {}", exc)
+        return None, []
+
+
 @router.get("")
 async def get_status(rt: AppRuntime = Depends(get_runtime)) -> dict:
+    master_account, positions = await _master_snapshot(rt)
+
     products_status: dict[str, dict] = {}
     for name, p in rt.products.items():
+        symbols = list(p.config.symbols)
+        product_positions = [
+            public_position(pos)
+            for pos in positions
+            if is_product_position(pos["symbol"], pos.get("comment"), symbols)
+        ]
         products_status[name] = {
             "day_pnl": p.day_tracker.state.total_pnl_usd,
             "day_trades_opened": p.day_tracker.state.trades_opened,
             "week_net_pnl": p.week_tracker.state.net_pnl_usd,
             "week_state": p.week_tracker.state.state,
             "week_cycle_id": p.week_tracker.state.cycle_id,
+            "symbols": symbols,
+            # No magic numbers exist in this engine — attribution is by symbol +
+            # comment. Surfaced as null so the dashboard doesn't imply otherwise.
+            "magic_number": None,
+            "open_positions_count": len(product_positions),
+            "open_positions": product_positions,
         }
 
     # Phase 6 — freeze state (read-only, no admin key needed for visibility).
@@ -36,5 +65,6 @@ async def get_status(rt: AppRuntime = Depends(get_runtime)) -> dict:
         "last_tick": rt.last_tick.isoformat() if rt.last_tick else None,
         "last_tick_status": rt.last_tick_status,
         "freeze": freeze_info,
+        "master_account": master_account,
         "products": products_status,
     }

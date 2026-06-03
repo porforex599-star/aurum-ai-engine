@@ -8,6 +8,7 @@ from src.config import Settings
 from src.engine.close_detector import CloseDetector
 from src.engine.freeze_manager import FreezeManager
 from src.engine.intent_bus import IntentBus
+from src.engine.master_account import AccountSnapshotCache
 from src.engine.order_executor import OrderExecutor
 from src.engine.position_poller import PositionPoller
 from src.engine.signal_lock import SignalLock
@@ -61,6 +62,12 @@ class AppRuntime:
         self.close_detector = CloseDetector(self.get_rpc_connection)
         self.signal_lock = SignalLock(
             cooldown_seconds=settings.signal_cooldown_seconds
+        )
+        # Phase 6.4 — master account + positions snapshot for the admin
+        # dashboard. Cached ~8s so /status polling (every ~10s) doesn't hammer
+        # the RPC connection. TTL is a constant (no new env var).
+        self.account_snapshot = AccountSnapshotCache(
+            self.get_rpc_connection, ttl_seconds=8.0
         )
 
         sb_raw = (

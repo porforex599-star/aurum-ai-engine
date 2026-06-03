@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
@@ -185,3 +186,112 @@ def test_unfreeze_publishes_to_intent_bus(client_with_runtime) -> None:
     )
     kinds = [e.kind for e in rt.intent_bus.recent(10)]
     assert "unfrozen" in kinds
+
+
+# -------------------- Phase 6.4 — close-all --------------------
+
+
+class _StubSnapshot:
+    def __init__(self, positions) -> None:
+        self._positions = positions
+
+    async def get(self, force_refresh: bool = False):  # noqa: ARG002
+        return SimpleNamespace(account=None, positions=self._positions, fetched_at=0.0)
+
+
+def _pos(symbol, comment, pid, pnl=1.0):
+    return {
+        "position_id": pid,
+        "symbol": symbol,
+        "side": "BUY",
+        "lot": 0.02,
+        "open_price": 100.0,
+        "current_price": 101.0,
+        "floating_pnl": pnl,
+        "opened_at": "2026-06-03T13:43:00+00:00",
+        "comment": comment,
+        "magic": 0,
+    }
+
+
+def _runtime_for_close(monkeypatch, positions, close_results):
+    monkeypatch.setenv("ADMIN_KEY", "test-admin-secret")
+    rt = AppRuntime(_settings(), MagicMock(), MagicMock(), MagicMock())
+    rt.freeze_manager = _StubFreeze()  # type: ignore[assignment]
+    rt.account_snapshot = _StubSnapshot(positions)  # type: ignore[assignment]
+    rt.order_executor = SimpleNamespace(  # type: ignore[assignment]
+        execute_close=AsyncMock(side_effect=close_results),
+        _last_error={"exc_msg": "broker rejected"},
+    )
+    set_runtime(rt)
+    return rt
+
+
+_HDR = {"X-Admin-Key": "test-admin-secret"}
+
+
+def test_close_all_closes_only_matching_product_positions(monkeypatch) -> None:
+    # gold strategy position (close), manual XAUUSD (comment guard → skip),
+    # multi-CFD EURUSD (wrong product → skip).
+    positions = [
+        _pos("XAUUSD", "AURUM_AI order_block", "g1", pnl=5.2),
+        _pos("XAUUSD", "AURUM_AI", "manual1", pnl=9.9),
+        _pos("EURUSD", "AURUM_AI mean_reversion", "m1", pnl=1.0),
+    ]
+    rt = _runtime_for_close(monkeypatch, positions, close_results=[True])
+    try:
+        r = TestClient(app).post("/admin/products/gold_ai/close-all", headers=_HDR, json={})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["product"] == "gold_ai"
+        assert body["positions_closed"] == 1
+        assert body["positions_failed"] == 0
+        assert body["total_pnl"] == 5.2
+        assert [d["position_id"] for d in body["details"]] == ["g1"]
+        # Only the one matching position was closed (manual + EURUSD untouched).
+        rt.order_executor.execute_close.assert_awaited_once()
+    finally:
+        set_runtime(None)
+
+
+def test_close_all_rejects_unknown_slug(monkeypatch) -> None:
+    _runtime_for_close(monkeypatch, [], close_results=[])
+    try:
+        r = TestClient(app).post("/admin/products/bogus/close-all", headers=_HDR, json={})
+        assert r.status_code == 400
+    finally:
+        set_runtime(None)
+
+
+def test_close_all_continues_on_partial_failure(monkeypatch) -> None:
+    positions = [
+        _pos("XAUUSD", "AURUM_AI order_block", "g1", pnl=4.0),
+        _pos("XAUUSD", "AURUM_AI trend_continuation", "g2", pnl=-2.0),
+    ]
+    # First close succeeds, second fails — endpoint must report both.
+    rt = _runtime_for_close(monkeypatch, positions, close_results=[True, False])
+    try:
+        r = TestClient(app).post(
+            "/admin/products/gold_ai/close-all", headers=_HDR, json={"reason": "test"}
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["positions_closed"] == 1
+        assert body["positions_failed"] == 1
+        assert body["total_pnl"] == 4.0
+        statuses = {d["position_id"]: d["status"] for d in body["details"]}
+        assert statuses == {"g1": "closed", "g2": "failed"}
+        failed = next(d for d in body["details"] if d["status"] == "failed")
+        assert failed["error"] == "broker rejected"
+        assert rt.order_executor.execute_close.await_count == 2
+    finally:
+        set_runtime(None)
+
+
+def test_close_all_requires_admin_key(monkeypatch) -> None:
+    _runtime_for_close(monkeypatch, [], close_results=[])
+    try:
+        r = TestClient(app).post("/admin/products/gold_ai/close-all", json={})
+        assert r.status_code == 401
+    finally:
+        set_runtime(None)
