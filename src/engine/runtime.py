@@ -11,6 +11,7 @@ from src.engine.intent_bus import IntentBus
 from src.engine.order_executor import OrderExecutor
 from src.engine.position_poller import PositionPoller
 from src.engine.snapshot_fetcher import SnapshotFetcher
+from src.engine.symbol_spec_cache import SymbolSpecCache
 from src.notifier.telegram import TelegramNotifier
 from src.products.gold_ai import GoldAIProduct
 from src.products.multi_cfd_ai import MultiCfdAIProduct
@@ -46,7 +47,16 @@ class AppRuntime:
         self.snapshot_fetcher = SnapshotFetcher(account=account, connection=connection)
         self.position_poller = PositionPoller(connection)
         self.position_manager = PositionManager()
-        self.order_executor = OrderExecutor(self.get_rpc_connection)
+        self.symbol_spec_cache = SymbolSpecCache(
+            self.get_rpc_connection,
+            ttl_seconds=settings.symbol_spec_cache_ttl_seconds,
+        )
+        self.order_executor = OrderExecutor(
+            self.get_rpc_connection,
+            spec_cache=self.symbol_spec_cache,
+            safety_buffer_points=settings.stop_safety_buffer_points,
+            min_padded_rr=settings.min_padded_rr,
+        )
         self.close_detector = CloseDetector(self.get_rpc_connection)
 
         sb_raw = (

@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.engine.intent_bus import IntentBus
+from src.engine.order_executor import OpenOutcome
 from src.products.models import CloseIntent, IntentKind, TradeIntent
 from src.scheduler.tick_runner import run_tick
 from src.strategy.models import MarketSnapshot, SetupName, SignalSide
@@ -47,6 +48,9 @@ def _runtime(
     if order_executor is None:
         order_executor = MagicMock(_last_error=None)
         order_executor.execute_open = AsyncMock(return_value={"order_id": "o1"})
+        order_executor.execute_open_with_padding = AsyncMock(
+            return_value=OpenOutcome(status="executed", result={"order_id": "o1"})
+        )
         order_executor.execute_close = AsyncMock(return_value=True)
         order_executor.execute_modify_sl = AsyncMock(return_value=True)
 
@@ -195,11 +199,14 @@ async def test_dry_run_trade_intent_publishes_open_without_executing() -> None:
 @pytest.mark.asyncio
 async def test_live_trade_intent_executes_open_and_publishes_executed() -> None:
     rt = _runtime(gold_evaluate=lambda *a, **k: _trade_intent(), dry_run=False)
-    rt.order_executor.execute_open = AsyncMock(
-        return_value={"order_id": "ORD-123", "position_id": "POS-9"}
+    rt.order_executor.execute_open_with_padding = AsyncMock(
+        return_value=OpenOutcome(
+            status="executed",
+            result={"order_id": "ORD-123", "position_id": "POS-9"},
+        )
     )
     await run_tick(rt)
-    rt.order_executor.execute_open.assert_awaited_once()
+    rt.order_executor.execute_open_with_padding.assert_awaited_once()
     items = rt.intent_bus.recent(50)
     executed = [
         i for i in items if i.product == "gold_ai" and i.kind == "open_executed"

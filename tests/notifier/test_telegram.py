@@ -219,6 +219,58 @@ def test_format_open_executed_renders_key_fields() -> None:
     assert "[LIVE]" in msg
 
 
+def test_format_open_executed_shows_padded_from_annotation() -> None:
+    e = _entry(
+        "open_executed",
+        product="multi_cfd_ai",
+        payload={
+            "symbol": "EURUSD.v",
+            "side": "buy",
+            "lot": 0.02,
+            "entry_price": 1.16000,
+            "sl_price": 1.15980,
+            "tp_price": 1.16210,
+            "sl_original": 1.16000,
+            "tp_original": 1.16210,
+            "setup": "mean_reversion",
+            "confidence": 0.65,
+        },
+    )
+    msg = format_message(e)
+    assert "padded from" in msg
+    # SL was adjusted (1.16000 -> 1.15980) so its annotation must appear.
+    assert "1.1600" in msg
+
+
+def test_format_skipped_rr_too_low_renders_reason() -> None:
+    e = _entry(
+        "skipped_rr_too_low",
+        product="multi_cfd_ai",
+        payload={
+            "symbol": "SP500.v",
+            "side": "buy",
+            "lot": 0.02,
+            "sl_price": 7599.0,
+            "tp_price": 7621.0,
+            "sl_original": 7603.0,
+            "tp_original": 7617.0,
+            "padded_rr": 1.0,
+            "min_rr": 1.2,
+            "setup": "mean_reversion",
+        },
+    )
+    msg = format_message(e)
+    assert "🚫" in msg
+    assert "SP500.v" in msg
+    assert "skipped" in msg
+    assert "mean_reversion" in msg
+
+
+def test_skipped_rr_too_low_is_not_skipped_by_default() -> None:
+    n = TelegramNotifier(token="t", chat_id="123", enabled=True)
+    assert n.should_send(_entry("skipped_rr_too_low")) is True
+
+
 def test_format_open_failed_shows_error() -> None:
     e = _entry(
         "open_failed",
