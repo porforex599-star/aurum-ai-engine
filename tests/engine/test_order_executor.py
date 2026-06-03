@@ -157,9 +157,24 @@ def _buy_intent_with(sl, tp, symbol="EURUSD.v") -> TradeIntent:
     )
 
 
+def _sell_intent_with(sl, tp, symbol="SP500.v") -> TradeIntent:
+    return TradeIntent(
+        kind=IntentKind.OPEN,
+        symbol=symbol,
+        side=SignalSide.SELL,
+        lot=0.02,
+        entry_price=None,
+        sl_price=sl,
+        tp_price=tp,
+        reason="r",
+        setup=SetupName.MEAN_REVERSION,
+        confidence=0.65,
+    )
+
+
 @pytest.mark.asyncio
 async def test_padding_widens_tight_buy_stops() -> None:
-    conn = _padding_conn(ask=1.16000)
+    conn = _padding_conn(ask=1.16000, bid=1.15998)
     ex = OrderExecutor(_provider(conn), spec_cache=_spec_cache(conn))
     # SL only 5 points away; TP far enough that R:R stays healthy.
     outcome = await ex.execute_open_with_padding(
@@ -167,11 +182,13 @@ async def test_padding_widens_tight_buy_stops() -> None:
     )
     assert outcome.status == "executed"
     _, kwargs = conn.create_market_buy_order.call_args
-    # min_distance = (10 + 10) * 0.00001 = 0.0002 → padded SL = 1.1598
-    assert kwargs["stop_loss"] == pytest.approx(1.15980)
+    # BUY SL is measured from the bid (close side): min_distance =
+    # (10 + 10) * 0.00001 = 0.0002 → padded SL = bid - 0.0002 = 1.15978.
+    assert kwargs["stop_loss"] == pytest.approx(1.15978)
     assert kwargs["take_profit"] == pytest.approx(1.16500)
     assert outcome.padding["adjusted"] is True
     assert outcome.padding["sl_original"] == 1.15995
+    # entry_price recorded on the trade is the fill price (ask for a BUY).
     assert outcome.padding["entry_price"] == pytest.approx(1.16000)
 
 
@@ -243,6 +260,68 @@ async def test_padding_skips_when_spec_fetch_fails() -> None:
     assert outcome.status == "skipped_padding_unavailable"
     assert outcome.reason == "padding_unavailable_spec_miss"
     conn.create_market_buy_order.assert_not_called()
+
+
+# -------- Round 2: spread-aware anchoring (SP500 "Invalid stops" fix) ---------
+# SP500.v: stopsLevel=100, point=0.1 → broker minimum = 10.0 index points,
+# measured from the CLOSE side (bid for BUY, ask for SELL). With a real index
+# spread, anchoring to the fill side left the SL within stopsLevel of the close
+# side by the spread, which the broker rejected as "Invalid stops".
+
+
+@pytest.mark.asyncio
+async def test_buy_sl_clears_stops_level_measured_from_bid() -> None:
+    # 3-point spread; tight mean_reversion BUY SL ~7 points below fill.
+    conn = _padding_conn(ask=7590.0, bid=7587.0, stops_level=100, point=0.1, digits=1)
+    ex = OrderExecutor(_provider(conn), spec_cache=_spec_cache(conn))
+    outcome = await ex.execute_open_with_padding(
+        _buy_intent_with(sl=7583.0, tp=7620.0, symbol="SP500.v")
+    )
+    assert outcome.status == "executed"
+    _, kwargs = conn.create_market_buy_order.call_args
+    sl = kwargs["stop_loss"]
+    # Broker rule: (bid - SL) >= stopsLevel * point = 10.0. The fill-anchored
+    # value (7590 - 11 = 7579) would only be 8.0 from the bid → rejected.
+    assert 7587.0 - sl >= 10.0
+    assert sl == pytest.approx(7576.0)  # bid - (100+10)*0.1
+    assert outcome.padding["adjusted"] is True
+    # Recorded entry is the fill price (ask for a BUY).
+    assert outcome.padding["entry_price"] == pytest.approx(7590.0)
+
+
+@pytest.mark.asyncio
+async def test_sell_sl_clears_stops_level_measured_from_ask() -> None:
+    # 3-point spread; tight mean_reversion SELL SL ~7 points above fill.
+    conn = _padding_conn(ask=7590.0, bid=7587.0, stops_level=100, point=0.1, digits=1)
+    ex = OrderExecutor(_provider(conn), spec_cache=_spec_cache(conn))
+    outcome = await ex.execute_open_with_padding(
+        _sell_intent_with(sl=7594.0, tp=7560.0, symbol="SP500.v")
+    )
+    assert outcome.status == "executed"
+    _, kwargs = conn.create_market_sell_order.call_args
+    sl = kwargs["stop_loss"]
+    # Broker rule for a SELL: (SL - ask) >= 10.0, measured from the ask.
+    assert sl - 7590.0 >= 10.0
+    assert sl == pytest.approx(7601.0)  # ask + (100+10)*0.1
+    assert outcome.padding["adjusted"] is True
+    # Recorded entry is the fill price (bid for a SELL).
+    assert outcome.padding["entry_price"] == pytest.approx(7587.0)
+
+
+@pytest.mark.asyncio
+async def test_wide_index_stops_unchanged_no_regression() -> None:
+    # trend_continuation-style wide stops already clear stopsLevel from the
+    # close side → padding must leave them untouched (no behavior change).
+    conn = _padding_conn(ask=7590.0, bid=7587.0, stops_level=100, point=0.1, digits=1)
+    ex = OrderExecutor(_provider(conn), spec_cache=_spec_cache(conn))
+    outcome = await ex.execute_open_with_padding(
+        _buy_intent_with(sl=7550.0, tp=7700.0, symbol="NAS100.v")
+    )
+    assert outcome.status == "executed"
+    _, kwargs = conn.create_market_buy_order.call_args
+    assert kwargs["stop_loss"] == pytest.approx(7550.0)
+    assert kwargs["take_profit"] == pytest.approx(7700.0)
+    assert outcome.padding["adjusted"] is False
 
 
 @pytest.mark.asyncio

@@ -117,7 +117,13 @@ class OrderExecutor:
         silently bypassing the safety system."""
         self._last_error = None
 
-        # 1. Live price for re-anchoring (ask for BUY, bid for SELL).
+        # 1. Live price. The order FILLS at ask (BUY) / bid (SELL), but MT5
+        #    measures the stops-level distance from the price the position
+        #    CLOSES at — bid (BUY) / ask (SELL). Padding to the fill side leaves
+        #    the SL within stopsLevel of the close side by exactly the spread,
+        #    which the broker rejects as "Invalid stops". So we anchor padding +
+        #    geometry to the close-side reference price, and only record the
+        #    fill price on the trade.
         try:
             conn = await self._get_conn()
             price = await conn.get_symbol_price(symbol=intent.symbol)
@@ -128,16 +134,17 @@ class OrderExecutor:
                 exc=e,
             )
 
-        entry = (
-            self._price_field(price, "ask")
-            if intent.side == SignalSide.BUY
-            else self._price_field(price, "bid")
-        )
-        if entry <= 0:
+        ask = self._price_field(price, "ask")
+        bid = self._price_field(price, "bid")
+        if intent.side == SignalSide.BUY:
+            fill_price, reference_price = ask, bid
+        else:
+            fill_price, reference_price = bid, ask
+        if fill_price <= 0 or reference_price <= 0:
             return self._padding_unavailable(
                 intent,
                 "padding_unavailable_price_fetch",
-                detail=f"non-positive live price ({entry})",
+                detail=f"non-positive live price (ask={ask}, bid={bid})",
             )
 
         # 2. Symbol spec (cached). No cache configured → no padding possible.
@@ -162,11 +169,14 @@ class OrderExecutor:
                 detail=f"invalid point ({spec.point})",
             )
 
-        # 3. Pad outward to the broker minimum stop distance.
+        # 3. Pad outward to the broker minimum stop distance. Anchor to the
+        #    close-side reference price (bid for BUY, ask for SELL) — that is the
+        #    price MT5 measures stopsLevel against, so the buffer is not eaten by
+        #    the spread.
         try:
             padded = pad_stops_for_broker(
                 side=intent.side.value,
-                entry_price=entry,
+                entry_price=reference_price,
                 sl=intent.sl_price,
                 tp=intent.tp_price,
                 stops_level_points=spec.stops_level,
@@ -183,7 +193,7 @@ class OrderExecutor:
         padded_tp = round(padded.tp, digits) if padded.tp is not None else None
 
         padding_meta: dict[str, Any] = {
-            "entry_price": entry,
+            "entry_price": fill_price,
             "sl_price": padded_sl,
             "tp_price": padded_tp,
             "adjusted": padded.adjusted,
@@ -212,20 +222,22 @@ class OrderExecutor:
 
         if padded.adjusted:
             logger.info(
-                "padding: {} {} SL {}->{} TP {}->{} (entry={}, stopsLevel={})",
+                "padding: {} {} SL {}->{} TP {}->{} "
+                "(fill={}, ref={}, stopsLevel={})",
                 intent.symbol,
                 intent.side.value,
                 intent.sl_price,
                 padded_sl,
                 intent.tp_price,
                 padded_tp,
-                entry,
+                fill_price,
+                reference_price,
                 spec.stops_level,
             )
 
-        # 5. Place with padded values (live entry anchor recorded too).
+        # 5. Place with padded values; record the fill price as the entry.
         padded_intent = replace(
-            intent, entry_price=entry, sl_price=padded_sl, tp_price=padded_tp
+            intent, entry_price=fill_price, sl_price=padded_sl, tp_price=padded_tp
         )
         result = await self.execute_open(padded_intent)
         if result is None:
