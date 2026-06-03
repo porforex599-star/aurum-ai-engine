@@ -215,23 +215,24 @@ async def _handle_eval_result(
                 now,
             )
         elif isinstance(item, TradeIntent):
-            res = await runtime.order_executor.execute_open(item)
-            if res is not None:
-                bus.publish(
-                    product,
-                    "open_executed",
-                    {**serialize_intent(item), **res},
-                    dry_run,
-                    now,
-                )
+            outcome = await runtime.order_executor.execute_open_with_padding(item)
+            if outcome.status == "executed":
+                payload = {**serialize_intent(item), **(outcome.result or {})}
+                if outcome.padding:
+                    payload.update(outcome.padding)
+                bus.publish(product, "open_executed", payload, dry_run, now)
+            elif outcome.status == "skipped_rr_too_low":
+                payload = {
+                    **serialize_intent(item),
+                    **(outcome.padding or {}),
+                    "reason": outcome.reason or "rr_too_low",
+                }
+                bus.publish(product, "skipped_rr_too_low", payload, dry_run, now)
             else:
                 bus.publish(
                     product,
                     "open_failed",
-                    {
-                        **serialize_intent(item),
-                        **(runtime.order_executor._last_error or {}),
-                    },
+                    {**serialize_intent(item), **(outcome.error or {})},
                     dry_run,
                     now,
                 )

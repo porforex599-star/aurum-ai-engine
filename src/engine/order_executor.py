@@ -1,20 +1,52 @@
 from __future__ import annotations
 
+from dataclasses import dataclass, replace
 from typing import Any, Callable
 
 from loguru import logger
 
+from src.engine.stops_padding import pad_stops_for_broker
+from src.engine.symbol_spec_cache import SymbolSpecCache
 from src.products.models import CloseIntent, ModifySLIntent, TradeIntent
 from src.strategy.models import SignalSide
+
+
+@dataclass(frozen=True)
+class OpenOutcome:
+    """Result of a padding-aware open attempt.
+
+    status:
+      - "executed"            → order placed; `result` holds order metadata.
+      - "skipped_rr_too_low"  → padding degraded R:R below the floor; not placed.
+      - "failed"              → placement/price/geometry error; `error` set.
+    """
+
+    status: str
+    result: dict | None = None
+    error: dict | None = None
+    padding: dict | None = None
+    reason: str | None = None
 
 
 class OrderExecutor:
     """Routes intents to a MetaApi RPC connection. Records last_error on failure."""
 
-    def __init__(self, rpc_connection_provider: Callable[[], Any]) -> None:
+    def __init__(
+        self,
+        rpc_connection_provider: Callable[[], Any],
+        spec_cache: SymbolSpecCache | None = None,
+        safety_buffer_points: int = 10,
+        min_padded_rr: float = 1.2,
+    ) -> None:
         """rpc_connection_provider: async callable returning a connected
-        RpcMetaApiConnectionInstance (use runtime.get_rpc_connection)."""
+        RpcMetaApiConnectionInstance (use runtime.get_rpc_connection).
+
+        spec_cache: SymbolSpecCache used by execute_open_with_padding. When
+        None, padding is skipped and orders are placed raw."""
         self._get_conn = rpc_connection_provider
+        self._spec_cache = spec_cache
+        self._safety_buffer_points = safety_buffer_points
+        self._min_padded_rr = min_padded_rr
         self._last_error: dict | None = None
 
     @staticmethod
@@ -23,8 +55,18 @@ class OrderExecutor:
             return str(result.get(key) or "")
         return str(getattr(result, key, "") or "")
 
+    @staticmethod
+    def _price_field(price: Any, key: str) -> float:
+        if isinstance(price, dict):
+            return float(price.get(key) or 0.0)
+        return float(getattr(price, key, 0.0) or 0.0)
+
     async def execute_open(self, intent: TradeIntent) -> dict | None:
-        """Open a market order. Returns dict with order_id + metadata, or None."""
+        """Open a market order with the intent's SL/TP exactly as given (raw).
+
+        Returns dict with order_id + metadata, or None. Does NOT pad — used by
+        the manual test-trade endpoint and as the final placement step of
+        execute_open_with_padding."""
         self._last_error = None
         try:
             conn = await self._get_conn()
@@ -56,6 +98,135 @@ class OrderExecutor:
             self._last_error = {"exc_type": type(e).__name__, "exc_msg": str(e)[:300]}
             logger.exception(f"execute_open failed for {intent.symbol}: {e}")
             return None
+
+    async def execute_open_with_padding(self, intent: TradeIntent) -> OpenOutcome:
+        """Re-anchor SL/TP to the live price, pad to the broker minimum stop
+        distance, enforce an R:R floor, then place the order.
+
+        Falls back to a raw placement (best-effort) if the live price or symbol
+        spec is unavailable — never worse than the pre-fix behavior."""
+        self._last_error = None
+
+        # 1. Live price for re-anchoring (ask for BUY, bid for SELL).
+        try:
+            conn = await self._get_conn()
+            price = await conn.get_symbol_price(symbol=intent.symbol)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "padding: price fetch failed for {}, placing raw: {}",
+                intent.symbol,
+                e,
+            )
+            return self._raw_outcome(await self.execute_open(intent))
+
+        entry = (
+            self._price_field(price, "ask")
+            if intent.side == SignalSide.BUY
+            else self._price_field(price, "bid")
+        )
+        if entry <= 0:
+            logger.warning(
+                "padding: non-positive live price for {} (got {}), placing raw",
+                intent.symbol,
+                entry,
+            )
+            return self._raw_outcome(await self.execute_open(intent))
+
+        # 2. Symbol spec (cached). No cache → no padding.
+        if self._spec_cache is None:
+            return self._raw_outcome(await self.execute_open(intent))
+        try:
+            spec = await self._spec_cache.get(intent.symbol)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "padding: spec fetch failed for {}, placing raw: {}",
+                intent.symbol,
+                e,
+            )
+            return self._raw_outcome(await self.execute_open(intent))
+
+        if spec.point <= 0:
+            logger.warning(
+                "padding: invalid point ({}) for {}, placing raw",
+                spec.point,
+                intent.symbol,
+            )
+            return self._raw_outcome(await self.execute_open(intent))
+
+        # 3. Pad outward to the broker minimum stop distance.
+        try:
+            padded = pad_stops_for_broker(
+                side=intent.side.value,
+                entry_price=entry,
+                sl=intent.sl_price,
+                tp=intent.tp_price,
+                stops_level_points=spec.stops_level,
+                point=spec.point,
+                safety_buffer_points=self._safety_buffer_points,
+            )
+        except ValueError as e:
+            self._last_error = {"exc_type": "ValueError", "exc_msg": str(e)[:300]}
+            logger.warning("padding: invalid geometry for {}: {}", intent.symbol, e)
+            return OpenOutcome(status="failed", error=self._last_error)
+
+        digits = spec.digits if spec.digits > 0 else 5
+        padded_sl = round(padded.sl, digits)
+        padded_tp = round(padded.tp, digits) if padded.tp is not None else None
+
+        padding_meta: dict[str, Any] = {
+            "entry_price": entry,
+            "sl_price": padded_sl,
+            "tp_price": padded_tp,
+            "adjusted": padded.adjusted,
+        }
+        if padded.adjusted:
+            padding_meta["sl_original"] = intent.sl_price
+            padding_meta["tp_original"] = intent.tp_price
+        if padded.rr is not None:
+            padding_meta["padded_rr"] = round(padded.rr, 3)
+            padding_meta["min_rr"] = self._min_padded_rr
+
+        # 4. R:R floor — don't fire terrible-quality orders just because we
+        #    widened the stops.
+        if padded.rr is not None and padded.rr < self._min_padded_rr:
+            logger.info(
+                "padding: {} R:R {:.3f} < floor {} after padding — skipping",
+                intent.symbol,
+                padded.rr,
+                self._min_padded_rr,
+            )
+            return OpenOutcome(
+                status="skipped_rr_too_low",
+                reason="rr_too_low",
+                padding=padding_meta,
+            )
+
+        if padded.adjusted:
+            logger.info(
+                "padding: {} {} SL {}->{} TP {}->{} (entry={}, stopsLevel={})",
+                intent.symbol,
+                intent.side.value,
+                intent.sl_price,
+                padded_sl,
+                intent.tp_price,
+                padded_tp,
+                entry,
+                spec.stops_level,
+            )
+
+        # 5. Place with padded values (live entry anchor recorded too).
+        padded_intent = replace(
+            intent, entry_price=entry, sl_price=padded_sl, tp_price=padded_tp
+        )
+        result = await self.execute_open(padded_intent)
+        if result is None:
+            return OpenOutcome(status="failed", error=self._last_error)
+        return OpenOutcome(status="executed", result=result, padding=padding_meta)
+
+    def _raw_outcome(self, result: dict | None) -> OpenOutcome:
+        if result is None:
+            return OpenOutcome(status="failed", error=self._last_error)
+        return OpenOutcome(status="executed", result=result)
 
     async def execute_close(self, intent: CloseIntent) -> bool:
         self._last_error = None

@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     admin_key: str = Field(default="")
     freeze_cache_ttl_seconds: float = Field(default=30.0)
 
+    # Phase 2.6.2 — broker stop-distance padding
+    stop_safety_buffer_points: int = Field(default=10)
+    min_padded_rr: float = Field(default=1.2)
+    symbol_spec_cache_ttl_seconds: float = Field(default=300.0)
+
 
 _settings: Settings | None = None
 

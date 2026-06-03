@@ -39,6 +39,7 @@ _KIND_EMOJI: dict[str, str] = {
     "modify_sl_failed": "⚠️",
     "trade_closed": "💰",
     "trade_closed_dryrun": "💭",
+    "skipped_rr_too_low": "🚫",
     "error": "❌",
     "friday_close": "🗓️",
     # Phase 6 — freeze state
@@ -81,6 +82,20 @@ def _fmt_pnl(value: Any) -> str:
     return f"{sign}{f:,.2f}"
 
 
+def _fmt_sl_tp_line(p: dict) -> str:
+    """Render the SL / TP line, annotating "(padded from X)" when the order
+    executor widened a stop to satisfy the broker's minimum distance."""
+    sl, tp = p.get("sl_price"), p.get("tp_price")
+    sl_orig, tp_orig = p.get("sl_original"), p.get("tp_original")
+    sl_txt = _fmt_price(sl)
+    if sl_orig is not None and sl_orig != sl:
+        sl_txt += f" (padded from {_fmt_price(sl_orig)})"
+    tp_txt = _fmt_price(tp)
+    if tp_orig is not None and tp_orig != tp:
+        tp_txt += f" (padded from {_fmt_price(tp_orig)})"
+    return f"SL {sl_txt} / TP {tp_txt}"
+
+
 def format_message(entry: IntentLogEntry) -> str:
     """Render an IntentLogEntry as a short HTML-parsed Telegram message."""
     p = entry.payload or {}
@@ -104,7 +119,7 @@ def format_message(entry: IntentLogEntry) -> str:
         lines.append(line)
         sl, tp = p.get("sl_price"), p.get("tp_price")
         if sl is not None or tp is not None:
-            lines.append(f"SL {_fmt_price(sl)} / TP {_fmt_price(tp)}")
+            lines.append(_fmt_sl_tp_line(p))
         setup = p.get("setup")
         conf = p.get("confidence")
         if setup or conf is not None:
@@ -197,6 +212,21 @@ def format_message(entry: IntentLogEntry) -> str:
         lines.append(
             f"skipped <code>{_esc(symbol)} {_esc(side)} {_esc(lot)}</code>"
         )
+        setup = p.get("setup")
+        if setup:
+            lines.append(f"setup={_esc(setup)}")
+
+    elif entry.kind == "skipped_rr_too_low":
+        symbol = p.get("symbol", "?")
+        side = str(p.get("side", "")).upper()
+        lot = p.get("lot", "?")
+        lines.append(f"{_esc(symbol)} {_esc(side)} {_esc(lot)} — skipped")
+        if p.get("sl_price") is not None or p.get("tp_price") is not None:
+            lines.append(_fmt_sl_tp_line(p))
+        padded_rr = p.get("padded_rr")
+        min_rr = p.get("min_rr")
+        if padded_rr is not None and min_rr is not None:
+            lines.append(f"R:R {_esc(padded_rr)} &lt; floor {_esc(min_rr)}")
         setup = p.get("setup")
         if setup:
             lines.append(f"setup={_esc(setup)}")
