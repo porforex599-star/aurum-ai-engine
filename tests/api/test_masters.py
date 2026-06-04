@@ -428,3 +428,191 @@ async def test_get_master_for_product_falls_back_to_gold_ai(client):
     assert resolved is not None
     assert resolved["login"] == "100600"
     assert resolved["assigned_product"] == "gold_ai"
+
+
+# -------------------- password-based auto-provisioning --------------------
+#
+# These drive the real provisioning code path in MetaApiClientPool by mocking
+# the MetaApi SDK class it instantiates, so create_account / deploy /
+# wait_connected and the SDK→HTTP error mapping are exercised end-to-end.
+
+
+class _FakeProvisionAccount:
+    """Stand-in for the MetatraderAccount returned by create_account()."""
+
+    def __init__(self) -> None:
+        self.id = "prov-acc-123"
+        self.region = "london"
+        self.base_currency = "USD"
+        self.state = "CREATED"
+        self.connection_status = "CONNECTED"
+        self.deployed = False
+        self.connected = False
+
+    async def deploy(self) -> None:
+        self.deployed = True
+
+    async def wait_connected(self, *_a, **_k) -> None:
+        self.connected = True
+
+
+class _FakeAccountApi:
+    def __init__(self, account, calls, raiser) -> None:
+        self._account = account
+        self._calls = calls
+        self._raiser = raiser
+
+    async def create_account(self, dto: dict):
+        self._calls.append(dto)
+        if self._raiser is not None:
+            raise self._raiser
+        return self._account
+
+
+def _patch_sdk(monkeypatch, account=None, raiser=None):
+    """Patch metaapi_client.MetaApi → a fake; return (calls, account)."""
+    import src.core.metaapi_client as mc
+
+    account = account or _FakeProvisionAccount()
+    calls: list[dict] = []
+
+    class _FakeMetaApi:
+        def __init__(self, _token):
+            self.metatrader_account_api = _FakeAccountApi(account, calls, raiser)
+
+    monkeypatch.setattr(mc, "MetaApi", _FakeMetaApi)
+    return calls, account
+
+
+def test_post_masters_with_password_provisions(client, monkeypatch):
+    """Password path: SDK provisions the account and the row is auto-populated
+    with its id/region/currency; the password is forwarded to the SDK but never
+    persisted or returned."""
+    c, fake = client
+    calls, account = _patch_sdk(monkeypatch)
+
+    r = c.post(
+        "/masters",
+        headers=_HDR,
+        json={
+            "login": "500123",
+            "broker": "KVB Prime",
+            "server": "KVBPrime-Live",
+            "password": "s3cr3t-mt5-pw",
+        },
+    )
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Auto-populated from the connected MetaApi account.
+    assert body["metaapi_account_id"] == "prov-acc-123"
+    assert body["metaapi_region"] == "london"
+    assert body["currency"] == "USD"
+    assert body["status"] == "standby"
+
+    # SDK received the right DTO incl. the password — and the account deployed.
+    assert calls and calls[0]["type"] == "cloud-g2"
+    assert calls[0]["platform"] == "mt5"
+    assert calls[0]["login"] == "500123"
+    assert calls[0]["password"] == "s3cr3t-mt5-pw"
+    assert account.deployed and account.connected
+
+    # Password must never leak into the response or the persisted row.
+    assert "password" not in body
+    stored = fake._tables["master_accounts"].rows[0]
+    assert "password" not in stored
+
+
+def test_post_masters_password_invalid_credentials_401(client, monkeypatch):
+    """SDK auth failure → 401 invalid_credentials."""
+    from metaapi_cloud_sdk.clients.error_handler import UnauthorizedException
+
+    c, _ = client
+    _patch_sdk(monkeypatch, raiser=UnauthorizedException("bad creds"))
+
+    r = c.post(
+        "/masters",
+        headers=_HDR,
+        json={
+            "login": "500124",
+            "broker": "KVB Prime",
+            "server": "KVBPrime-Live",
+            "password": "wrong-pw",
+        },
+    )
+    assert r.status_code == 401
+    assert r.json()["detail"] == "invalid_credentials"
+
+
+def test_post_masters_password_invalid_server_400(client, monkeypatch):
+    """SDK validation failure (e.g. bad server) → 400 invalid_server."""
+    from metaapi_cloud_sdk.clients.error_handler import ValidationException
+
+    c, _ = client
+    _patch_sdk(monkeypatch, raiser=ValidationException("unknown server"))
+
+    r = c.post(
+        "/masters",
+        headers=_HDR,
+        json={
+            "login": "500125",
+            "broker": "KVB Prime",
+            "server": "Nope-Server",
+            "password": "pw",
+        },
+    )
+    assert r.status_code == 400
+    assert r.json()["detail"] == "invalid_server"
+
+
+def test_post_masters_ambiguous_credentials_422(client):
+    """Both password and metaapi_account_id → 422 ambiguous_credentials."""
+    c, _ = client
+    r = c.post(
+        "/masters",
+        headers=_HDR,
+        json={
+            "login": "500126",
+            "broker": "KVB Prime",
+            "server": "KVBPrime-Live",
+            "metaapi_account_id": "acc-xyz",
+            "password": "pw",
+        },
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"] == "ambiguous_credentials"
+
+
+def test_post_masters_missing_credentials_422(client):
+    """Neither password nor metaapi_account_id → 422 missing_credentials."""
+    c, _ = client
+    r = c.post(
+        "/masters",
+        headers=_HDR,
+        json={
+            "login": "500127",
+            "broker": "KVB Prime",
+            "server": "KVBPrime-Live",
+        },
+    )
+    assert r.status_code == 422
+    assert r.json()["detail"] == "missing_credentials"
+
+
+def test_post_masters_backward_compat_skips_provisioning(client, monkeypatch):
+    """metaapi_account_id path is unchanged: the SDK is never touched."""
+    import src.core.metaapi_client as mc
+
+    c, _ = client
+
+    class _BoomMetaApi:
+        def __init__(self, _token):
+            raise AssertionError("MetaApi must not be constructed on the id path")
+
+    monkeypatch.setattr(mc, "MetaApi", _BoomMetaApi)
+
+    r = _register(c, login="500128", metaapi_account_id="pre-existing-id")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["metaapi_account_id"] == "pre-existing-id"
+    assert body["status"] == "standby"

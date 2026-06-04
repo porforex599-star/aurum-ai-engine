@@ -199,6 +199,19 @@ class AppRuntime:
             account_snapshot=self.account_snapshot,
         )
 
+    async def provision_master_account(
+        self, *, login: str, password: str, server: str
+    ) -> Any:
+        """Provision a brand-new MetaApi account for a master via the pool.
+
+        Delegates to `MetaApiClientPool.provision_account`; returns a
+        `ProvisionedAccount`. The password is forwarded to the SDK only — it is
+        never logged, stored, or returned by this runtime.
+        """
+        return await self._metaapi_pool.provision_account(
+            login=login, password=password, server=server
+        )
+
     async def get_account_id_for_product(self, slug: str) -> str:
         """Resolve the metaapi_account_id serving `slug`.
 
