@@ -35,6 +35,7 @@ def _runtime(
     order_executor=None,
     close_detector=None,
     token_service=None,
+    trade_logger=None,
 ):
     snap = snapshot or MarketSnapshot(
         symbol="XAUUSD", bars_m15=[], bars_h1=[], bars_h4=[]
@@ -58,6 +59,9 @@ def _runtime(
     if token_service is None:
         token_service = SimpleNamespace(add_trade=AsyncMock())
 
+    if trade_logger is None:
+        trade_logger = SimpleNamespace(record_closed_trade=AsyncMock())
+
     rt = SimpleNamespace(
         settings=SimpleNamespace(
             dry_run=dry_run,
@@ -74,6 +78,7 @@ def _runtime(
         order_executor=order_executor,
         close_detector=close_detector or _close_detector(),
         token_service=token_service,
+        trade_logger=trade_logger,
         signal_lock=SignalLock(cooldown_seconds=300.0),
         products={},
         last_tick=None,
@@ -81,11 +86,15 @@ def _runtime(
     )
     if gold_evaluate is not None:
         rt.products["gold_ai"] = SimpleNamespace(
-            evaluate=gold_evaluate, record_trade_closed=MagicMock()
+            evaluate=gold_evaluate,
+            record_trade_closed=MagicMock(),
+            config=SimpleNamespace(symbols=("XAUUSD",)),
         )
     if mcfd_evaluate is not None:
         rt.products["multi_cfd_ai"] = SimpleNamespace(
-            evaluate=mcfd_evaluate, record_trade_closed=MagicMock()
+            evaluate=mcfd_evaluate,
+            record_trade_closed=MagicMock(),
+            config=SimpleNamespace(symbols=tuple(multi_symbols or ["EURUSD"])),
         )
     return rt
 
@@ -293,3 +302,91 @@ async def test_position_close_detected_live_calls_add_trade() -> None:
     assert kwargs["metaapi_position_id"] == "P1"
     items = rt.intent_bus.recent(50)
     assert any(i.kind == "trade_closed" for i in items)
+
+
+@pytest.mark.asyncio
+async def test_close_persists_to_trade_logger_with_phase64_attribution() -> None:
+    """A close with an AURUM_AI strategy comment is attributed and persisted."""
+    deal = {
+        "position_id": "P1",
+        "symbol": "XAUUSD",
+        "pnl": 42.5,
+        "opened_at": datetime(2026, 6, 3, 10, 0, tzinfo=timezone.utc),
+        "closed_at": datetime(2026, 6, 3, 11, 0, tzinfo=timezone.utc),
+        "side": "BUY",
+        "lot": 0.03,
+        "comment": "AURUM_AI order_block",
+        "entry_price": 2000.0,
+        "exit_price": 2010.0,
+        "gross_profit": 45.0,
+        "swap": -1.0,
+        "commission": -1.5,
+    }
+    cd = _close_detector(closed_ids=["P1"], deal=deal)
+    trade_logger = SimpleNamespace(record_closed_trade=AsyncMock())
+    rt = _runtime(
+        gold_evaluate=lambda *a, **k: None,
+        dry_run=False,
+        close_detector=cd,
+        trade_logger=trade_logger,
+    )
+    await run_tick(rt)
+    trade_logger.record_closed_trade.assert_awaited_once()
+    _, kwargs = trade_logger.record_closed_trade.call_args
+    assert kwargs["product"] == "gold_ai"
+    assert kwargs["setup"] == "order_block"
+    assert kwargs["symbol_norm"] == "XAUUSD"
+    assert kwargs["pnl"] == 42.5
+    assert kwargs["duration_seconds"] == 3600
+    assert kwargs["dry_run"] is False
+
+
+@pytest.mark.asyncio
+async def test_close_persists_paper_trade_in_dry_run() -> None:
+    """dry_run closes are still logged (flagged dry_run=True), even though the
+    token RPC is skipped."""
+    deal = {
+        "position_id": "P2",
+        "symbol": "EURUSD",
+        "pnl": -3.0,
+        "opened_at": datetime(2026, 6, 3, 10, 0, tzinfo=timezone.utc),
+        "closed_at": datetime(2026, 6, 3, 10, 30, tzinfo=timezone.utc),
+        "comment": "AURUM_AI mean_reversion",
+    }
+    cd = _close_detector(closed_ids=["P2"], deal=deal)
+    trade_logger = SimpleNamespace(record_closed_trade=AsyncMock())
+    rt = _runtime(
+        mcfd_evaluate=lambda *a, **k: [],
+        multi_symbols=["EURUSD", "GBPUSD"],
+        dry_run=True,
+        close_detector=cd,
+        trade_logger=trade_logger,
+    )
+    await run_tick(rt)
+    trade_logger.record_closed_trade.assert_awaited_once()
+    _, kwargs = trade_logger.record_closed_trade.call_args
+    assert kwargs["product"] == "multi_cfd_ai"
+    assert kwargs["dry_run"] is True
+
+
+@pytest.mark.asyncio
+async def test_manual_order_close_not_persisted() -> None:
+    """A bare 'AURUM_AI' comment (manual /test/trade) is excluded from stats."""
+    deal = {
+        "position_id": "P3",
+        "symbol": "XAUUSD",
+        "pnl": 9.9,
+        "opened_at": datetime(2026, 6, 3, 10, 0, tzinfo=timezone.utc),
+        "closed_at": datetime(2026, 6, 3, 10, 5, tzinfo=timezone.utc),
+        "comment": "AURUM_AI",
+    }
+    cd = _close_detector(closed_ids=["P3"], deal=deal)
+    trade_logger = SimpleNamespace(record_closed_trade=AsyncMock())
+    rt = _runtime(
+        gold_evaluate=lambda *a, **k: None,
+        dry_run=False,
+        close_detector=cd,
+        trade_logger=trade_logger,
+    )
+    await run_tick(rt)
+    trade_logger.record_closed_trade.assert_not_awaited()

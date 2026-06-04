@@ -14,6 +14,7 @@ from src.api.admin import router as admin_router
 from src.api.health import router as health_router
 from src.api.intents import router as intents_router
 from src.api.positions import router as positions_router
+from src.api.stats import router as stats_router
 from src.api.status import router as status_router
 from src.api.symbols import router as symbols_router
 from src.api.test_trade import router as test_trade_router
@@ -107,3 +108,4 @@ app.include_router(intents_router)
 app.include_router(symbols_router)
 app.include_router(test_trade_router)
 app.include_router(admin_router)
+app.include_router(stats_router)

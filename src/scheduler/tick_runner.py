@@ -6,6 +6,11 @@ from typing import Any
 from loguru import logger
 
 from src.engine.intent_bus import serialize_intent
+from src.engine.master_account import (
+    is_product_position,
+    normalize_symbol,
+    parse_setup,
+)
 from src.engine.runtime import AppRuntime
 from src.products.models import CloseIntent, TradeIntent
 from src.risk.models import RiskParams
@@ -26,6 +31,61 @@ def _resolve_product(runtime: AppRuntime, symbol: str) -> tuple[Any, str, str]:
     return runtime.products.get(key), key, _TOKEN_PRODUCT_CODE[key]
 
 
+def _attribute_product(runtime: AppRuntime, symbol: str, comment: str | None) -> str | None:
+    """Phase 6.4 attribution: match a closed trade to a product by symbol-set
+    membership + the "AURUM_AI <setup>" comment guard. A bare "AURUM_AI" manual
+    order matches nothing, so it's excluded from product stats. Returns the
+    product key or None."""
+    for key, product in runtime.products.items():
+        config = getattr(product, "config", None)
+        symbols = getattr(config, "symbols", None)
+        if symbols and is_product_position(symbol, comment, symbols):
+            return key
+    return None
+
+
+def _duration_seconds(opened_at: Any, closed_at: Any) -> int | None:
+    if isinstance(opened_at, datetime) and isinstance(closed_at, datetime):
+        return int((closed_at - opened_at).total_seconds())
+    return None
+
+
+async def _persist_closed_trade(
+    runtime: AppRuntime, position_id: str, deal: dict, dry_run: bool
+) -> None:
+    """Phase 6.5 — log the closed trade to master_closed_trades for stats.
+
+    Runs in both dry_run and live so paper history is captured. Attribution is
+    the Phase 6.4 scheme; unattributed closes (manual orders, foreign symbols)
+    are skipped. Never raises — the ledger is best-effort bookkeeping."""
+    trade_logger = getattr(runtime, "trade_logger", None)
+    if trade_logger is None:
+        return
+    symbol = deal.get("symbol", "") or ""
+    product_key = _attribute_product(runtime, symbol, deal.get("comment"))
+    if product_key is None:
+        return
+    await trade_logger.record_closed_trade(
+        position_id=position_id,
+        product=product_key,
+        symbol=symbol,
+        symbol_norm=normalize_symbol(symbol),
+        pnl=deal["pnl"],
+        closed_at=deal["closed_at"],
+        opened_at=deal.get("opened_at"),
+        side=deal.get("side"),
+        lot=deal.get("lot"),
+        setup=parse_setup(deal.get("comment")),
+        entry_price=deal.get("entry_price"),
+        exit_price=deal.get("exit_price"),
+        gross_profit=deal.get("gross_profit"),
+        swap=deal.get("swap"),
+        commission=deal.get("commission"),
+        duration_seconds=_duration_seconds(deal.get("opened_at"), deal.get("closed_at")),
+        dry_run=dry_run,
+    )
+
+
 async def _handle_closes(runtime: AppRuntime, positions: list, dry_run: bool, now: datetime) -> None:
     """Detect positions that closed since the last tick and record their PnL."""
     closed_ids = runtime.close_detector.detect_closes(positions)
@@ -35,6 +95,9 @@ async def _handle_closes(runtime: AppRuntime, positions: list, dry_run: bool, no
             continue
         symbol = deal["symbol"]
         product, key, product_code = _resolve_product(runtime, symbol)
+
+        # Phase 6.5 — persist to the stats ledger (both dry_run and live).
+        await _persist_closed_trade(runtime, closed_id, deal, dry_run)
 
         if product is not None:
             product.record_trade_closed(deal["pnl"])

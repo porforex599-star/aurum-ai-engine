@@ -108,6 +108,27 @@ def is_product_position(
     return c.startswith(_AURUM_PREFIX) and c != _AURUM_PREFIX
 
 
+def normalize_symbol(symbol: str) -> str:
+    """Strip the broker suffix so per-symbol stats roll up cleanly.
+
+    Brokers expose suffixed variants ("US500.v", "XAUUSD.m"); the part before
+    the first dot is the standard symbol the dashboard groups by.
+    """
+    s = (symbol or "").strip()
+    return s.split(".", 1)[0] if "." in s else s
+
+
+def parse_setup(comment: str | None) -> str | None:
+    """Extract the setup name from a strategy comment ("AURUM_AI order_block"
+    → "order_block"). A bare "AURUM_AI" (manual order) or non-tag returns None.
+    """
+    c = (comment or "").strip()
+    if not c.startswith(_AURUM_PREFIX):
+        return None
+    setup = c[len(_AURUM_PREFIX):].strip()
+    return setup or None
+
+
 @dataclass
 class MasterSnapshot:
     account: dict | None

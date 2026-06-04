@@ -36,8 +36,26 @@ class CloseDetector:
             return deal.get(key, default)
         return getattr(deal, key, default)
 
+    @staticmethod
+    def _deal_dt(deal: Any) -> datetime | None:
+        """Coerce a deal `time` (datetime or ISO string) to a datetime."""
+        t = CloseDetector._field(deal, "time")
+        if isinstance(t, datetime):
+            return t
+        if isinstance(t, str) and t:
+            try:
+                return datetime.fromisoformat(t.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        return None
+
     async def fetch_deal_info(self, position_id: str) -> dict | None:
-        """Get deal info for a closed position via get_deals_by_time_range."""
+        """Get deal info for a closed position via get_deals_by_time_range.
+
+        Returns net PnL plus the fields the Phase 6.5 stats ledger needs: real
+        broker entry time (not the tick-poll sighting time), entry/exit prices,
+        side, volume, comment (the "AURUM_AI <setup>" tag) and the PnL split.
+        """
         try:
             conn = await self._get_conn()
             meta = self._position_meta.get(position_id, {})
@@ -66,12 +84,57 @@ class CloseDetector:
                 float(self._field(d, "commission", 0) or 0) for d in matching
             )
             net_pnl = total_profit + total_swap + total_commission
+
+            # Split entry (DEAL_ENTRY_IN) from exit (DEAL_ENTRY_OUT) deals so we
+            # can recover real open time + entry/exit prices. Fall back
+            # gracefully when a broker omits entryType.
+            entries = [
+                d
+                for d in matching
+                if str(self._field(d, "entryType", "") or "").upper().endswith("_IN")
+            ]
+            exits = [
+                d
+                for d in matching
+                if str(self._field(d, "entryType", "") or "").upper().endswith("_OUT")
+            ]
+            entry_deal = entries[0] if entries else matching[0]
+            exit_deal = exits[-1] if exits else None
+
+            side_raw = str(self._field(entry_deal, "type", "") or "").lower()
+            side = "BUY" if "buy" in side_raw else "SELL" if "sell" in side_raw else None
+
+            real_opened = self._deal_dt(entry_deal) or (
+                opened_at if isinstance(opened_at, datetime) else None
+            )
+            real_closed = self._deal_dt(exit_deal) if exit_deal else None
+            closed_at = real_closed or datetime.now(timezone.utc)
+
+            comment = self._field(entry_deal, "comment") or (
+                self._field(exit_deal, "comment") if exit_deal else None
+            )
+            symbol = (
+                str(self._field(entry_deal, "symbol", "") or "")
+                or meta.get("symbol", "")
+            )
+            entry_price = self._field(entry_deal, "price")
+            exit_price = self._field(exit_deal, "price") if exit_deal else None
+            lot = self._field(entry_deal, "volume")
+
             return {
                 "position_id": position_id,
-                "symbol": meta.get("symbol", ""),
+                "symbol": symbol,
                 "pnl": net_pnl,
-                "opened_at": opened_at,
-                "closed_at": datetime.now(timezone.utc),
+                "opened_at": real_opened or opened_at,
+                "closed_at": closed_at,
+                "side": side,
+                "lot": float(lot) if lot is not None else None,
+                "comment": comment,
+                "entry_price": float(entry_price) if entry_price is not None else None,
+                "exit_price": float(exit_price) if exit_price is not None else None,
+                "gross_profit": total_profit,
+                "swap": total_swap,
+                "commission": total_commission,
             }
         except Exception as e:  # noqa: BLE001
             logger.exception(f"fetch_deal_info failed for {position_id}: {e}")
