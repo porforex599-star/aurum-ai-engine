@@ -27,6 +27,7 @@ from src.core.master_account_service import (
     MasterAccountError,
     MasterAccountService,
 )
+from src.core.metaapi_client import ProvisioningError
 from src.engine.runtime import AppRuntime, get_runtime
 
 router = APIRouter(prefix="/masters", tags=["masters"])
@@ -44,8 +45,14 @@ class RegisterMasterBody(BaseModel):
     # is stored NULL and auto-filled from MetaApi on the first successful
     # account-info snapshot (MT5 reports the broker currency, e.g. USD/USC/EUR).
     currency: str | None = Field(default=None)
-    metaapi_account_id: str = Field(..., min_length=1)
+    # Supply EXACTLY ONE of (metaapi_account_id, password) — enforced in the
+    # handler. metaapi_account_id adopts a pre-provisioned MetaApi account
+    # (the original flow); password auto-provisions a brand-new one.
+    metaapi_account_id: str | None = Field(default=None)
     metaapi_region: str = Field(default="eu-west", min_length=1)
+    # Write-only: the MT5 account password, forwarded to the MetaApi SDK once to
+    # provision the account. Never logged, never persisted, never serialized.
+    password: str | None = Field(default=None, exclude=True, repr=False)
     notes: str | None = None
 
 
@@ -73,15 +80,53 @@ async def register_master(
     rt: AppRuntime = Depends(get_runtime),
     _: None = Depends(_verify_admin_key),
 ) -> dict:
-    """Register a new master account. Starts in `standby` (unassigned)."""
+    """Register a new master account. Starts in `standby` (unassigned).
+
+    Two mutually-exclusive ways to supply the MetaApi account:
+      * `metaapi_account_id` — adopt a pre-provisioned account (original flow,
+        unchanged);
+      * `password` — auto-provision a new MetaApi account from the MT5 login +
+        server, then store the resulting id/region/currency.
+    """
+    has_id = bool(body.metaapi_account_id)
+    has_password = bool(body.password)
+    if not has_id and not has_password:
+        raise HTTPException(status_code=422, detail="missing_credentials")
+    if has_id and has_password:
+        raise HTTPException(status_code=422, detail="ambiguous_credentials")
+
+    metaapi_account_id = body.metaapi_account_id
+    metaapi_region = body.metaapi_region
+    currency = body.currency
+
+    if has_password:
+        # Password path — provision a fresh MetaApi account. The password is
+        # passed to the SDK only; it is never logged here or persisted below.
+        try:
+            provisioned = await rt.provision_master_account(
+                login=body.login,
+                password=body.password,
+                server=body.server,
+            )
+        except ProvisioningError as err:
+            logger.warning(
+                "master provisioning failed: login={} code={}", body.login, err.code
+            )
+            raise HTTPException(status_code=err.status_code, detail=err.code) from err
+        metaapi_account_id = provisioned.metaapi_account_id
+        # MetaApi is authoritative for region; an explicit currency wins, else
+        # use the broker base currency MetaApi reports.
+        metaapi_region = provisioned.metaapi_region or metaapi_region
+        currency = currency or provisioned.currency
+
     try:
         master = await _service(rt).register_master(
             login=body.login,
             broker=body.broker,
             server=body.server,
-            currency=body.currency,
-            metaapi_account_id=body.metaapi_account_id,
-            metaapi_region=body.metaapi_region,
+            currency=currency,
+            metaapi_account_id=metaapi_account_id,
+            metaapi_region=metaapi_region,
             notes=body.notes,
         )
     except MasterAccountError as err:

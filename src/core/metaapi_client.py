@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import asyncio
 import traceback
+from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from typing import Any
 
 from loguru import logger
 from metaapi_cloud_sdk import MetaApi
+from metaapi_cloud_sdk.clients.error_handler import (
+    ApiException,
+    UnauthorizedException,
+    ValidationException,
+)
 
 from src.config import get_settings
 
@@ -16,6 +22,34 @@ except PackageNotFoundError:
     _SDK_VERSION = "unknown"
 
 logger.info("metaapi-cloud-sdk version: {}", _SDK_VERSION)
+
+# Hard ceiling for deploy() + wait_connected() while provisioning a new account.
+PROVISION_TIMEOUT_SECONDS = 60.0
+
+
+class ProvisioningError(Exception):
+    """A MetaApi provisioning failure, pre-classified for the API layer.
+
+    Carries the HTTP `status_code` and a stable machine-readable `code` so the
+    `/masters` handler can surface a precise error without re-inspecting the
+    underlying SDK exception.
+    """
+
+    def __init__(self, status_code: int, code: str, message: str) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.code = code
+        self.message = message
+
+
+@dataclass(frozen=True)
+class ProvisionedAccount:
+    """Identifiers extracted from a freshly connected MetaApi account."""
+
+    metaapi_account_id: str
+    metaapi_region: str | None
+    currency: str | None
+
 
 
 class MetaApiClient:
@@ -130,6 +164,94 @@ class MetaApiClientPool:
 
     def all(self) -> list[MetaApiClient]:
         return list(self._clients.values())
+
+    async def provision_account(
+        self,
+        *,
+        login: str,
+        password: str,
+        server: str,
+        name: str | None = None,
+        timeout: float = PROVISION_TIMEOUT_SECONDS,
+    ) -> ProvisionedAccount:
+        """Create, deploy and connect a new MT5 account on MetaApi.
+
+        Returns the new account's id/region/base-currency. `password` is only
+        ever forwarded to the SDK — it is never logged, persisted, or returned.
+        SDK failures are translated into `ProvisioningError` with an
+        HTTP-appropriate status + code.
+        """
+        settings = get_settings()
+        api = MetaApi(settings.METAAPI_TOKEN)
+
+        # NOTE: never include `password` in any log line below.
+        logger.info("provisioning MetaApi account: login={} server={}", login, server)
+
+        account_dto: dict[str, Any] = {
+            "name": name or f"Master {login}",
+            "type": "cloud-g2",
+            "login": str(login),
+            "password": password,
+            "server": server,
+            "platform": "mt5",
+            "magic": 0,
+        }
+
+        try:
+            account = await api.metatrader_account_api.create_account(account_dto)
+        except UnauthorizedException as exc:
+            raise ProvisioningError(
+                401, "invalid_credentials", "MetaApi rejected the MT5 credentials"
+            ) from exc
+        except ValidationException as exc:
+            raise ProvisioningError(
+                400, "invalid_server", "MetaApi rejected the server or account parameters"
+            ) from exc
+        except ApiException as exc:
+            raise ProvisioningError(
+                502, "metaapi_unreachable", "MetaApi API error while creating the account"
+            ) from exc
+        except (asyncio.TimeoutError, OSError, ConnectionError) as exc:
+            raise ProvisioningError(
+                502, "metaapi_unreachable", "Could not reach MetaApi"
+            ) from exc
+
+        try:
+            await account.deploy()
+            await asyncio.wait_for(account.wait_connected(), timeout=timeout)
+        except asyncio.TimeoutError as exc:
+            raise ProvisioningError(
+                504, "provisioning_timeout", "MetaApi account did not connect in time"
+            ) from exc
+        except UnauthorizedException as exc:
+            raise ProvisioningError(
+                401, "invalid_credentials", "MetaApi rejected the MT5 credentials"
+            ) from exc
+        except ValidationException as exc:
+            raise ProvisioningError(
+                400, "invalid_server", "MetaApi rejected the server or account parameters"
+            ) from exc
+        except ApiException as exc:
+            raise ProvisioningError(
+                502, "metaapi_unreachable", "MetaApi API error while deploying the account"
+            ) from exc
+        except (OSError, ConnectionError) as exc:
+            raise ProvisioningError(
+                502, "metaapi_unreachable", "Could not reach MetaApi"
+            ) from exc
+
+        provisioned = ProvisionedAccount(
+            metaapi_account_id=account.id,
+            metaapi_region=getattr(account, "region", None),
+            currency=getattr(account, "base_currency", None),
+        )
+        logger.info(
+            "provisioned MetaApi account id={} region={} currency={}",
+            provisioned.metaapi_account_id,
+            provisioned.metaapi_region,
+            provisioned.currency,
+        )
+        return provisioned
 
 
 _client: MetaApiClient | None = None
