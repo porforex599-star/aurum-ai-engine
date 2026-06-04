@@ -156,7 +156,7 @@ class MasterAccountService:
         login: str,
         broker: str,
         server: str,
-        currency: str,
+        currency: str | None = None,
         metaapi_account_id: str,
         metaapi_region: str = "eu-west",
         notes: str | None = None,
@@ -164,6 +164,10 @@ class MasterAccountService:
         """Insert a new master in `standby` (unassigned). Raises on DB error.
 
         A duplicate `login` (the table's UNIQUE column) surfaces as a 409.
+
+        `currency` is optional: when not supplied it is stored NULL and gets
+        auto-filled from MetaApi on the first successful snapshot fetch (see
+        `backfill_currency`).
         """
         row = {
             "login": login,
@@ -194,6 +198,68 @@ class MasterAccountService:
             logger.exception("master_accounts register failed: {}", exc)
             raise
         return data[0] if data else row
+
+    async def backfill_currency(self, metaapi_account_id: str, currency: str) -> bool:
+        """Auto-fill a master's currency from MetaApi after first connect.
+
+        Looks up the master row by `metaapi_account_id` and, only if its currency
+        is currently empty/NULL, sets it to `currency` (the value MT5 reports in
+        account info). Idempotent and one-shot in effect: a row that already has a
+        currency (e.g. the seeded #97038939 master) is left untouched.
+
+        Returns True when the currency is "resolved" — either it was written now
+        or the row already had one — so the caller can stop retrying. Returns
+        False on a transient miss (no row yet / DB error / blank currency) so the
+        caller may try again on a later snapshot.
+        """
+        if not (currency or "").strip():
+            return False
+
+        def _query() -> list[dict]:
+            client = self._client()
+            if client is None:
+                raise RuntimeError("supabase client not initialized")
+            res = (
+                client.table(self.TABLE_NAME)
+                .select(_SELECT)
+                .eq("metaapi_account_id", metaapi_account_id)
+                .limit(1)
+                .execute()
+            )
+            return res.data or []
+
+        def _set(master_id: str) -> None:
+            client = self._client()
+            if client is None:
+                raise RuntimeError("supabase client not initialized")
+            (
+                client.table(self.TABLE_NAME)
+                .update({"currency": currency})
+                .eq("id", master_id)
+                .execute()
+            )
+
+        try:
+            rows = await asyncio.to_thread(_query)
+            if not rows:
+                # No registry row for this MetaApi account (yet) — nothing to fill.
+                return False
+            row = rows[0]
+            if (row.get("currency") or "").strip():
+                return True  # already populated — leave the seed/existing row alone
+            await asyncio.to_thread(_set, row["id"])
+            logger.info(
+                "auto-filled currency={} for master {} (metaapi {})",
+                currency,
+                row.get("id"),
+                metaapi_account_id,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "currency backfill failed for metaapi {}: {}", metaapi_account_id, exc
+            )
+            return False
 
     async def assign(self, master_id: str, product: str) -> dict:
         """Assign `product` to a master: set it live, and demote any OTHER master
