@@ -18,6 +18,9 @@ class Settings(BaseSettings):
     METAAPI_TOKEN: str = Field(..., min_length=1)
     METAAPI_MASTER_ACCOUNT_ID: str = Field(..., min_length=1)
 
+    # Shared secret guarding admin-only endpoints (e.g. POST /api/masters).
+    ADMIN_KEY: str = Field(..., min_length=1)
+
     APP_ENV: Literal["production", "staging", "development"] = "production"
     PORT: int = 8000
     TIMEZONE: str = "Asia/Bangkok"

@@ -8,6 +8,7 @@ from loguru import logger
 
 from src import __version__
 from src.api.health import router as health_router
+from src.api.masters import router as masters_router
 from src.config import get_settings
 from src.core.metaapi_client import get_metaapi_client
 from src.core.supabase_client import get_supabase_client
@@ -49,3 +50,4 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Aurum AI Engine", version=__version__, lifespan=lifespan)
 app.include_router(health_router)
+app.include_router(masters_router)

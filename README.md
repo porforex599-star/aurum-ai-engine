@@ -51,6 +51,7 @@ pytest -q
 | `SUPABASE_SERVICE_ROLE_KEY` | Service-role API key (server-side only) |
 | `METAAPI_TOKEN` | MetaApi Cloud SDK auth token |
 | `METAAPI_MASTER_ACCOUNT_ID` | MetaApi master account UUID |
+| `ADMIN_KEY` | Shared secret for admin-only endpoints (sent as `X-Admin-Key`) |
 | `APP_ENV` | `production` / `staging` / `development` |
 | `PORT` | HTTP port (Railway provides this) |
 | `TIMEZONE` | IANA timezone (default `Asia/Bangkok`) |
