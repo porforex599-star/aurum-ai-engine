@@ -258,6 +258,57 @@ def test_get_returns_expected_shape(client):
         assert key in sample
 
 
+def test_post_masters_without_currency_succeeds(client):
+    """The Add-master UI no longer sends currency — POST must succeed and store
+    it NULL, to be auto-filled from MetaApi on first connect."""
+    c, _ = client
+    body = {
+        "login": "100888",
+        "broker": "InterStellarFinancial",
+        "server": "InterStellarFinancial-Server",
+        "metaapi_account_id": "acc-" + uuid.uuid4().hex[:8],
+        "metaapi_region": "eu-west",
+    }
+    r = c.post("/masters", headers=_HDR, json=body)
+    assert r.status_code == 200
+    out = r.json()
+    assert out["login"] == "100888"
+    assert out["status"] == "standby"
+    # currency is present in the shape but unset (NULL) until MetaApi fills it.
+    assert out.get("currency") in (None, "")
+
+
+async def test_backfill_currency_fills_only_when_empty(client):
+    """backfill_currency sets currency on the matching row only when it is empty,
+    and never clobbers a row that already has one (e.g. the seeded master)."""
+    c, fake = client
+    acc = "acc-" + uuid.uuid4().hex[:8]
+    # Register with no currency, then auto-fill from a MetaApi-reported value.
+    mid = c.post(
+        "/masters",
+        headers=_HDR,
+        json={
+            "login": "100999",
+            "broker": "InterStellarFinancial",
+            "server": "InterStellarFinancial-Server",
+            "metaapi_account_id": acc,
+        },
+    ).json()["id"]
+
+    svc = MasterAccountService(fake)
+    assert await svc.backfill_currency(acc, "USD") is True
+    masters = {m["id"]: m for m in c.get("/masters", headers=_HDR).json()["masters"]}
+    assert masters[mid]["currency"] == "USD"
+
+    # Second call is a no-op (already set) but still reports "resolved".
+    assert await svc.backfill_currency(acc, "EUR") is True
+    masters = {m["id"]: m for m in c.get("/masters", headers=_HDR).json()["masters"]}
+    assert masters[mid]["currency"] == "USD"
+
+    # Unknown MetaApi account → not resolved (retry later), no row created.
+    assert await svc.backfill_currency("acc-nope", "GBP") is False
+
+
 def test_duplicate_login_returns_409(client):
     c, _ = client
     assert _register(c, login="100009").status_code == 200

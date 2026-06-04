@@ -144,11 +144,17 @@ class AccountSnapshotCache:
         conn_provider: Callable[[], Awaitable[Any]],
         ttl_seconds: float = 8.0,
         time_fn: Callable[[], float] = time.monotonic,
+        on_account_info: Callable[[dict], Awaitable[bool]] | None = None,
     ) -> None:
         self._get_conn = conn_provider
         self._ttl = ttl_seconds
         self._now = time_fn
         self._cache: MasterSnapshot | None = None
+        # Optional one-shot hook fired with the parsed account on the first
+        # successful account-info fetch (used to auto-fill master_accounts.currency
+        # from MetaApi). Returning True marks it done so it never fires again.
+        self._on_account_info = on_account_info
+        self._account_hook_done = False
 
     async def get(self, force_refresh: bool = False) -> MasterSnapshot:
         if (
@@ -173,6 +179,17 @@ class AccountSnapshotCache:
             account = parse_account(ai)
         except Exception as e:  # noqa: BLE001
             logger.warning("master snapshot: account info fetch failed: {}", e)
+
+        if (
+            account is not None
+            and self._on_account_info is not None
+            and not self._account_hook_done
+        ):
+            try:
+                if await self._on_account_info(account):
+                    self._account_hook_done = True
+            except Exception as e:  # noqa: BLE001
+                logger.warning("master snapshot: account-info hook failed: {}", e)
 
         try:
             raw = await conn.get_positions()

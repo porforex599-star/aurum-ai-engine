@@ -40,7 +40,10 @@ class RegisterMasterBody(BaseModel):
     login: str = Field(..., min_length=1)
     broker: str = Field(..., min_length=1)
     server: str = Field(..., min_length=1)
-    currency: str = Field(..., min_length=1)
+    # Optional — the Add-master UI no longer collects currency. When omitted it
+    # is stored NULL and auto-filled from MetaApi on the first successful
+    # account-info snapshot (MT5 reports the broker currency, e.g. USD/USC/EUR).
+    currency: str | None = Field(default=None)
     metaapi_account_id: str = Field(..., min_length=1)
     metaapi_region: str = Field(default="eu-west", min_length=1)
     notes: str | None = None

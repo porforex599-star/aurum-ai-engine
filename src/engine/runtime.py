@@ -77,7 +77,11 @@ class AppRuntime:
         # dashboard. Cached ~8s so /status polling (every ~10s) doesn't hammer
         # the RPC connection. TTL is a constant (no new env var).
         self.account_snapshot = AccountSnapshotCache(
-            self.get_rpc_connection, ttl_seconds=8.0
+            self.get_rpc_connection,
+            ttl_seconds=8.0,
+            on_account_info=self._make_currency_backfill(
+                settings.METAAPI_MASTER_ACCOUNT_ID
+            ),
         )
 
         sb_raw = (
@@ -127,6 +131,30 @@ class AppRuntime:
     # ------------------------------------------------------------------
     # Phase 7 Stage 2 — per-product master account routing
     # ------------------------------------------------------------------
+
+    def _make_currency_backfill(self, account_id: str):
+        """Build the AccountSnapshotCache hook that auto-fills a master's currency
+        from MetaApi on first connect. The hook reads the currency MT5 reports in
+        account info and asks the registry to set it on the matching row when that
+        row's currency is still empty. Never raises; returns True once resolved so
+        the cache stops firing it."""
+
+        async def _hook(account: dict) -> bool:
+            currency = (account or {}).get("currency")
+            if not currency:
+                return False  # MetaApi hasn't reported a currency yet — retry later
+            svc = getattr(self, "master_accounts", None)
+            if svc is None:
+                return True  # no registry to write to; don't keep retrying
+            try:
+                return await svc.backfill_currency(account_id, currency)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "currency backfill hook failed for {}: {}", account_id, exc
+                )
+                return False
+
+        return _hook
 
     def _make_rpc_provider(self, account: Any):
         """Build a lazy, per-account RPC connection provider (one connection per
@@ -238,7 +266,11 @@ class AppRuntime:
                 min_padded_rr=self.settings.min_padded_rr,
             ),
             close_detector=CloseDetector(get_conn),
-            account_snapshot=AccountSnapshotCache(get_conn, ttl_seconds=8.0),
+            account_snapshot=AccountSnapshotCache(
+                get_conn,
+                ttl_seconds=8.0,
+                on_account_info=self._make_currency_backfill(account_id),
+            ),
         )
 
     async def resolve_master_routing(self) -> None:
