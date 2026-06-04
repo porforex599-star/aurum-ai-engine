@@ -14,6 +14,7 @@ from src.engine.position_poller import PositionPoller
 from src.engine.signal_lock import SignalLock
 from src.engine.snapshot_fetcher import SnapshotFetcher
 from src.engine.symbol_spec_cache import SymbolSpecCache
+from src.core.trade_logger import TradeLogger
 from src.notifier.telegram import TelegramNotifier
 from src.products.gold_ai import GoldAIProduct
 from src.products.multi_cfd_ai import MultiCfdAIProduct
@@ -76,6 +77,8 @@ class AppRuntime:
             else supabase_client
         )
         self.token_service = TokenService(sb_raw)
+        # Phase 6.5 — closed-trade ledger feeding the dashboard stats endpoints.
+        self.trade_logger = TradeLogger(sb_raw)
 
         self.products: dict[str, Any] = {}
         self.last_tick: datetime | None = None
