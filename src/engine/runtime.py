@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any
 
 from src.config import Settings
+from src.core.master_account_service import MasterAccountService
 from src.engine.close_detector import CloseDetector
 from src.engine.freeze_manager import FreezeManager
 from src.engine.intent_bus import IntentBus
@@ -47,6 +48,9 @@ class AppRuntime:
             supabase_client=supabase_client,
             cache_ttl_seconds=settings.freeze_cache_ttl_seconds,
         )
+        # Phase 7 Stage 1 — master-account registry (read + admin writes). The
+        # engine is NOT yet wired to this; it stays on the env-var master.
+        self.master_accounts = MasterAccountService(supabase_client)
         self.snapshot_fetcher = SnapshotFetcher(account=account, connection=connection)
         self.position_poller = PositionPoller(connection)
         self.position_manager = PositionManager()
