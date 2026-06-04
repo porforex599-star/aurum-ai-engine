@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
+from types import SimpleNamespace
+from typing import Any
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from loguru import logger
@@ -53,15 +55,20 @@ def _resolve_product(rt: AppRuntime, slug: str):
     return rt.products[slug]
 
 
-async def _close_one(rt: AppRuntime, slug: str, pos: dict, reason: str) -> dict:
-    """Close a single attributed position; release its lock on success."""
+async def _close_one(
+    rt: AppRuntime, executor: Any, slug: str, pos: dict, reason: str
+) -> dict:
+    """Close a single attributed position; release its lock on success.
+
+    Phase 7 Stage 2: `executor` is the product's master executor so closes route
+    to the account that actually holds the position."""
     intent = CloseIntent(
         kind=IntentKind.CLOSE,
         position_id=pos["position_id"],
         reason=reason,
         code="admin_close",
     )
-    ok = await rt.order_executor.execute_close(intent)
+    ok = await executor.execute_close(intent)
     detail = {
         "position_id": pos["position_id"],
         "symbol": pos["symbol"],
@@ -73,8 +80,19 @@ async def _close_one(rt: AppRuntime, slug: str, pos: dict, reason: str) -> dict:
         # fires (close-all does NOT touch freeze state).
         rt.signal_lock.release(slug, pos["symbol"])
     else:
-        detail["error"] = (rt.order_executor._last_error or {}).get("exc_msg", "unknown")
+        detail["error"] = (executor._last_error or {}).get("exc_msg", "unknown")
     return detail
+
+
+async def _bundle_for_slug(rt: AppRuntime, slug: str):
+    """Resolve the per-product master bundle, falling back to the runtime's flat
+    components when the accessor isn't present (keeps existing tests working)."""
+    getter = getattr(rt, "get_bundle_for_product", None)
+    if getter is None:
+        return SimpleNamespace(
+            account_snapshot=rt.account_snapshot, order_executor=rt.order_executor
+        )
+    return await getter(slug)
 
 
 def _state_to_dict(state) -> dict:  # type: ignore[no-untyped-def]
@@ -146,9 +164,11 @@ async def close_all_positions(
     reason = body.reason or "admin_close_all"
     by = body.by or "admin"
 
+    # Phase 7 Stage 2 — act against the master account serving this product.
+    bundle = await _bundle_for_slug(rt, slug)
     # Fresh fetch (force_refresh) so we act on current broker state, not a
     # possibly-stale cached snapshot.
-    snap = await rt.account_snapshot.get(force_refresh=True)
+    snap = await bundle.account_snapshot.get(force_refresh=True)
     symbols = list(product.config.symbols)
     targets = [
         pos
@@ -159,7 +179,7 @@ async def close_all_positions(
     details: list[dict] = []
     total_pnl = 0.0
     for pos in targets:
-        detail = await _close_one(rt, slug, pos, reason)
+        detail = await _close_one(rt, bundle.order_executor, slug, pos, reason)
         details.append(detail)
         if detail["status"] == "closed":
             total_pnl += detail["pnl"]
@@ -216,7 +236,9 @@ async def close_single_position(
     reason = body.reason or "admin_close_position"
     by = body.by or "admin"
 
-    snap = await rt.account_snapshot.get(force_refresh=True)
+    # Phase 7 Stage 2 — act against the master account serving this product.
+    bundle = await _bundle_for_slug(rt, slug)
+    snap = await bundle.account_snapshot.get(force_refresh=True)
     symbols = list(product.config.symbols)
     pos = next(
         (
@@ -233,7 +255,7 @@ async def close_single_position(
             detail=f"position {position_id} not found for product {slug}",
         )
 
-    detail = await _close_one(rt, slug, pos, reason)
+    detail = await _close_one(rt, bundle.order_executor, slug, pos, reason)
     now = datetime.now(timezone.utc)
     rt.intent_bus.publish(
         "admin",

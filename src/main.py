@@ -63,6 +63,11 @@ async def lifespan(app: FastAPI):
         runtime = AppRuntime(settings, account, connection, supabase)
         set_runtime(runtime)
 
+        # Phase 7 Stage 2 — resolve per-product master routing from the
+        # master_accounts table and warm any non-default master connections.
+        # Never raises; products with no row stay on the default master.
+        await runtime.resolve_master_routing()
+
         scheduler = AsyncIOScheduler(timezone="UTC")
         scheduler.add_job(
             run_tick,

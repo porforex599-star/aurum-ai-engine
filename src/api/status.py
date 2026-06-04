@@ -10,7 +10,7 @@ router = APIRouter(prefix="/status", tags=["status"])
 
 
 async def _master_snapshot(rt: AppRuntime):
-    """Cached master account + positions; never raises (returns empty on failure)."""
+    """Cached default-master account + positions; never raises."""
     snap = getattr(rt, "account_snapshot", None)
     if snap is None:
         return None, []
@@ -22,6 +22,23 @@ async def _master_snapshot(rt: AppRuntime):
         return None, []
 
 
+async def _product_snapshot(rt: AppRuntime, slug: str):
+    """Phase 7 Stage 2 — the master account + positions serving `slug`.
+
+    Returns None when the runtime predates per-product routing (older tests /
+    fakes) so the caller falls back to the shared default snapshot."""
+    getter = getattr(rt, "get_bundle_for_product", None)
+    if getter is None:
+        return None
+    try:
+        bundle = await getter(slug)
+        s = await bundle.account_snapshot.get()
+        return s.account, s.positions
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("status: per-product snapshot failed for {}: {}", slug, exc)
+        return None
+
+
 @router.get("")
 async def get_status(rt: AppRuntime = Depends(get_runtime)) -> dict:
     master_account, positions = await _master_snapshot(rt)
@@ -29,9 +46,16 @@ async def get_status(rt: AppRuntime = Depends(get_runtime)) -> dict:
     products_status: dict[str, dict] = {}
     for name, p in rt.products.items():
         symbols = list(p.config.symbols)
+        # Prefer this product's own master (Stage 2); fall back to the shared
+        # default snapshot for single-master deployments / older runtimes.
+        per = await _product_snapshot(rt, name)
+        if per is not None:
+            prod_account, prod_positions = per
+        else:
+            prod_account, prod_positions = master_account, positions
         product_positions = [
             public_position(pos)
-            for pos in positions
+            for pos in prod_positions
             if is_product_position(pos["symbol"], pos.get("comment"), symbols)
         ]
         products_status[name] = {
@@ -44,6 +68,8 @@ async def get_status(rt: AppRuntime = Depends(get_runtime)) -> dict:
             # No magic numbers exist in this engine — attribution is by symbol +
             # comment. Surfaced as null so the dashboard doesn't imply otherwise.
             "magic_number": None,
+            # Phase 7 Stage 2 — the master account this product trades on.
+            "master_account": prod_account,
             "open_positions_count": len(product_positions),
             "open_positions": product_positions,
         }

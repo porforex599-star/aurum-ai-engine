@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 
 from loguru import logger
@@ -86,11 +87,17 @@ async def _persist_closed_trade(
     )
 
 
-async def _handle_closes(runtime: AppRuntime, positions: list, dry_run: bool, now: datetime) -> None:
-    """Detect positions that closed since the last tick and record their PnL."""
-    closed_ids = runtime.close_detector.detect_closes(positions)
+async def _handle_closes(
+    runtime: AppRuntime, bundle: Any, positions: list, dry_run: bool, now: datetime
+) -> None:
+    """Detect positions that closed since the last tick and record their PnL.
+
+    Phase 7 Stage 2: close detection is per-account (`bundle.close_detector`), so
+    each master tracks its own open set. Attribution, token + ledger writes and
+    the signal lock remain engine-global."""
+    closed_ids = bundle.close_detector.detect_closes(positions)
     for closed_id in closed_ids:
-        deal = await runtime.close_detector.fetch_deal_info(closed_id)
+        deal = await bundle.close_detector.fetch_deal_info(closed_id)
         if deal is None:
             continue
         symbol = deal["symbol"]
@@ -138,8 +145,39 @@ async def _handle_closes(runtime: AppRuntime, positions: list, dry_run: bool, no
                 now,
             )
 
-    runtime.close_detector.cleanup_meta(closed_ids)
-    runtime.close_detector.update_open(positions)
+    bundle.close_detector.cleanup_meta(closed_ids)
+    bundle.close_detector.update_open(positions)
+
+
+def _flat_bundle(runtime: AppRuntime) -> Any:
+    """Backward-compat bundle built from the runtime's flat attributes.
+
+    Used when a runtime predates the per-product accessor (the existing unit
+    tests, which inject single mock components). All products then share this
+    one bundle, exactly reproducing the original single-master tick."""
+    return SimpleNamespace(
+        account_id="__default__",
+        position_poller=runtime.position_poller,
+        close_detector=runtime.close_detector,
+        snapshot_fetcher=runtime.snapshot_fetcher,
+        order_executor=runtime.order_executor,
+    )
+
+
+async def _bundle_for(runtime: AppRuntime, slug: str) -> Any:
+    getter = getattr(runtime, "get_bundle_for_product", None)
+    if getter is None:
+        return _flat_bundle(runtime)
+    return await getter(slug)
+
+
+async def _executor_for(runtime: AppRuntime, slug: str) -> Any:
+    """The order executor for `slug`'s master. Minimal attribute footprint so it
+    works with the lean runtimes used by the freeze-gating unit tests."""
+    getter = getattr(runtime, "get_bundle_for_product", None)
+    if getter is None:
+        return runtime.order_executor
+    return (await getter(slug)).order_executor
 
 
 async def run_tick(runtime: AppRuntime) -> None:
@@ -148,18 +186,37 @@ async def run_tick(runtime: AppRuntime) -> None:
     dry_run = runtime.settings.dry_run
 
     try:
-        positions = await runtime.position_poller.fetch_all()
+        # Phase 7 Stage 2 — resolve each product's master, then dedup by account
+        # so products sharing a master poll/close once. Single-master: exactly
+        # one bundle, identical to the original tick.
+        product_bundles: dict[str, Any] = {
+            slug: await _bundle_for(runtime, slug) for slug in runtime.products
+        }
+        bundles_by_account: dict[str, Any] = {}
+        for bundle in product_bundles.values():
+            bundles_by_account.setdefault(bundle.account_id, bundle)
+        # No products registered → still service the default account (closes/SL).
+        if not bundles_by_account:
+            b = await _bundle_for(runtime, "")
+            bundles_by_account[b.account_id] = b
 
-        # Detect closes that happened since the last tick (PnL -> tokens).
-        await _handle_closes(runtime, positions, dry_run, now)
+        # 1. Per account: fetch open positions + detect/handle closes.
+        positions_by_account: dict[str, list] = {}
+        for account_id, bundle in bundles_by_account.items():
+            positions = await bundle.position_poller.fetch_all()
+            positions_by_account[account_id] = positions
+            await _handle_closes(runtime, bundle, positions, dry_run, now)
 
+        # 2. Per product: evaluate strategy on its own master's data + execute.
         if "gold_ai" in runtime.products:
             gold = runtime.products["gold_ai"]
+            bundle = product_bundles["gold_ai"]
+            positions = positions_by_account.get(bundle.account_id, [])
             symbol = runtime.settings.gold_ai_symbol
-            snap = await runtime.snapshot_fetcher.fetch(symbol)
+            snap = await bundle.snapshot_fetcher.fetch(symbol)
             if snap is None:
                 payload = {"reason": "snapshot_fetch_failed", "symbol": symbol}
-                last_err = getattr(runtime.snapshot_fetcher, "_last_error", None)
+                last_err = getattr(bundle.snapshot_fetcher, "_last_error", None)
                 if last_err:
                     payload.update(last_err)
                 runtime.intent_bus.publish("gold_ai", "error", payload, dry_run, now)
@@ -169,11 +226,13 @@ async def run_tick(runtime: AppRuntime) -> None:
 
         if "multi_cfd_ai" in runtime.products:
             mcfd = runtime.products["multi_cfd_ai"]
+            bundle = product_bundles["multi_cfd_ai"]
+            positions = positions_by_account.get(bundle.account_id, [])
             symbols = runtime.settings.multi_cfd_ai_symbols
             snapshots: dict = {}
             failed_symbols: list[str] = []
             for s in symbols:
-                snap = await runtime.snapshot_fetcher.fetch(s)
+                snap = await bundle.snapshot_fetcher.fetch(s)
                 if snap is not None:
                     snapshots[s] = snap
                 else:
@@ -183,7 +242,7 @@ async def run_tick(runtime: AppRuntime) -> None:
                     "reason": "all_snapshots_failed",
                     "symbols": list(symbols),
                 }
-                last_err = getattr(runtime.snapshot_fetcher, "_last_error", None)
+                last_err = getattr(bundle.snapshot_fetcher, "_last_error", None)
                 if last_err:
                     payload.update(last_err)
                 runtime.intent_bus.publish(
@@ -195,18 +254,22 @@ async def run_tick(runtime: AppRuntime) -> None:
                     runtime, "multi_cfd_ai", result, dry_run, now
                 )
 
-        if positions:
+        # 3. Per account: SL trailing on that account's positions.
+        for account_id, bundle in bundles_by_account.items():
+            positions = positions_by_account.get(account_id, [])
+            if not positions:
+                continue
             sl_intents = runtime.position_manager.evaluate_all(
                 positions, RiskParams.default()
             )
             for si in sl_intents:
                 if not dry_run:
-                    ok = await runtime.order_executor.execute_modify_sl(si)
+                    ok = await bundle.order_executor.execute_modify_sl(si)
                     payload = serialize_intent(si)
                     if not ok:
                         payload = {
                             **payload,
-                            **(runtime.order_executor._last_error or {}),
+                            **(bundle.order_executor._last_error or {}),
                         }
                     runtime.intent_bus.publish(
                         "position_manager",
@@ -233,8 +296,13 @@ async def run_tick(runtime: AppRuntime) -> None:
 async def _handle_eval_result(
     runtime: AppRuntime, product: str, result: Any, dry_run: bool, now: datetime
 ) -> None:
-    """Publish (and, when live, execute) the intents produced by a product."""
+    """Publish (and, when live, execute) the intents produced by a product.
+
+    Phase 7 Stage 2: order execution routes to the product's master executor
+    (resolved via its bundle); the freeze gate, signal lock and bus stay
+    engine-global."""
     bus = runtime.intent_bus
+    executor = await _executor_for(runtime, product)
 
     if result is None:
         bus.publish(product, "none", {"reason": "no_signal"}, dry_run, now)
@@ -270,10 +338,10 @@ async def _handle_eval_result(
             continue
 
         if isinstance(item, CloseIntent):
-            ok = await runtime.order_executor.execute_close(item)
+            ok = await executor.execute_close(item)
             payload = serialize_intent(item)
             if not ok:
-                payload = {**payload, **(runtime.order_executor._last_error or {})}
+                payload = {**payload, **(executor._last_error or {})}
             bus.publish(
                 product,
                 "close_executed" if ok else "close_failed",
@@ -301,7 +369,7 @@ async def _handle_eval_result(
                 )
                 continue
 
-            outcome = await runtime.order_executor.execute_open_with_padding(item)
+            outcome = await executor.execute_open_with_padding(item)
             if outcome.status == "executed":
                 payload = {**serialize_intent(item), **(outcome.result or {})}
                 if outcome.padding:
