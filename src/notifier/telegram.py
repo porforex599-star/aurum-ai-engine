@@ -18,12 +18,15 @@ Design notes:
 from __future__ import annotations
 
 import html
-from typing import Any, Iterable
+from typing import TYPE_CHECKING, Any, Iterable
 
 import httpx
 from loguru import logger
 
 from src.engine.intent_bus import IntentLogEntry
+
+if TYPE_CHECKING:
+    from src.schemas.sniper import SniperAlertPayload
 
 _API_BASE = "https://api.telegram.org"
 
@@ -302,6 +305,34 @@ def format_message(entry: IntentLogEntry) -> str:
     return "\n".join(lines)
 
 
+# Aurum Sniper analysis-post emoji palettes.
+_BIAS_EMOJI: dict[str, str] = {"bullish": "🟢", "bearish": "🔴"}
+_RISK_EMOJI: dict[str, str] = {"low": "🟢", "medium": "🟡", "high": "🔴"}
+
+
+def format_analysis_message(payload: "SniperAlertPayload") -> str:
+    """Render an Aurum Sniper analysis post as an HTML-parsed Telegram message."""
+    bias = str(payload.bias)
+    risk = str(payload.risk_level)
+    lines = [
+        f"🎯 <b>Aurum Sniper</b> — {_esc(payload.symbol)} · {_esc(payload.timeframe)}",
+        f"{_BIAS_EMOJI.get(bias, '🎯')} Bias: <b>{_esc(bias.upper())}</b>",
+        f"📍 Key level: <code>{_fmt_price(payload.key_level)}</code>",
+    ]
+    if payload.target_zones:
+        zones = "  ".join(
+            f"{_esc(z.id)}@{_fmt_price(z.price)}" for z in payload.target_zones
+        )
+        lines.append(f"🎯 Targets: {zones}")
+    lines.append(
+        f"{_RISK_EMOJI.get(risk, '')} Risk: {_esc(risk)} · "
+        f"Confidence: {_esc(payload.confidence)}%"
+    )
+    if payload.note:
+        lines.append(f"📝 {_esc(payload.note)}")
+    return "\n".join(lines)
+
+
 class TelegramNotifier:
     """Sends formatted IntentLogEntry messages to a Telegram chat.
 
@@ -375,6 +406,47 @@ class TelegramNotifier:
                 "telegram notify HTTP {}: kind={} body={}",
                 resp.status_code,
                 entry.kind,
+                body_text[:200],
+            )
+            return False
+        return True
+
+    async def send_analysis_alert(self, payload: "SniperAlertPayload") -> bool:
+        """Send an Aurum Sniper analysis post to Telegram.
+
+        Mirrors notify(): never raises, returns False when disabled or on any
+        network/HTTP error. Independent of the per-tick intent skip-kind filter.
+        """
+        if not self._enabled:
+            return False
+        url = f"{self._api_base}/bot{self._token}/sendMessage"
+        body = {
+            "chat_id": self._chat_id,
+            "text": format_analysis_message(payload),
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        }
+        try:
+            if self._client is not None:
+                resp = await self._client.post(url, json=body, timeout=self._timeout)
+            else:
+                async with httpx.AsyncClient(timeout=self._timeout) as client:
+                    resp = await client.post(url, json=body)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "telegram analysis alert exception: {}: {}",
+                type(e).__name__,
+                str(e)[:200],
+            )
+            return False
+        if resp.status_code >= 400:
+            try:
+                body_text = resp.text
+            except Exception:  # noqa: BLE001
+                body_text = ""
+            logger.warning(
+                "telegram analysis alert HTTP {}: body={}",
+                resp.status_code,
                 body_text[:200],
             )
             return False

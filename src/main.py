@@ -15,13 +15,14 @@ from src.api.health import router as health_router
 from src.api.intents import router as intents_router
 from src.api.masters import router as masters_router
 from src.api.positions import router as positions_router
+from src.api.sniper import router as sniper_router
 from src.api.stats import router as stats_router
 from src.api.status import router as status_router
 from src.api.symbols import router as symbols_router
 from src.api.test_trade import router as test_trade_router
 from src.config import get_settings
 from src.core.metaapi_client import get_metaapi_client
-from src.core.supabase_client import get_supabase_client
+from src.core.supabase_client import get_customers_client, get_supabase_client
 from src.engine.runtime import AppRuntime, set_runtime
 from src.scheduler.cron_jobs import run_friday_close
 from src.scheduler.tick_runner import run_tick
@@ -47,6 +48,9 @@ async def lifespan(app: FastAPI):
     supabase = get_supabase_client()
     supabase.connect()
     await supabase.ping()
+
+    customers = get_customers_client()
+    customers.connect()
 
     metaapi = get_metaapi_client()
     try:
@@ -103,6 +107,7 @@ async def lifespan(app: FastAPI):
                 logger.warning("Scheduler shutdown error: {}", exc)
         set_runtime(None)
         await metaapi.shutdown()
+        await customers.shutdown()
         await supabase.shutdown()
 
 
@@ -116,3 +121,4 @@ app.include_router(test_trade_router)
 app.include_router(admin_router)
 app.include_router(stats_router)
 app.include_router(masters_router)
+app.include_router(sniper_router)

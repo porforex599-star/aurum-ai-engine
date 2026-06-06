@@ -18,7 +18,12 @@ import httpx
 import pytest
 
 from src.engine.intent_bus import IntentLogEntry
-from src.notifier.telegram import TelegramNotifier, format_message
+from src.notifier.telegram import (
+    TelegramNotifier,
+    format_analysis_message,
+    format_message,
+)
+from src.schemas.sniper import SniperAlertPayload
 
 
 def _entry(kind: str, product: str = "gold_ai", payload: dict | None = None,
@@ -389,3 +394,69 @@ def test_default_skip_does_not_filter_freeze_kinds() -> None:
     assert n.should_send(_entry("frozen")) is True
     assert n.should_send(_entry("unfrozen")) is True
     assert n.should_send(_entry("frozen_skip")) is True
+
+
+# --- Aurum Sniper analysis alerts -------------------------------------------
+
+
+def _analysis_payload(**overrides) -> SniperAlertPayload:
+    data = {
+        "symbol": "XAUUSD",
+        "timeframe": "M5",
+        "bias": "bullish",
+        "key_level": 2345.67,
+        "target_zones": [{"id": "Z1", "price": 2350.0}],
+        "risk_level": "medium",
+        "confidence": 85,
+        "note": "ทดสอบ",
+    }
+    data.update(overrides)
+    return SniperAlertPayload(**data)
+
+
+def test_format_analysis_message_renders_fields() -> None:
+    msg = format_analysis_message(_analysis_payload())
+    assert "Aurum Sniper" in msg
+    assert "XAUUSD" in msg
+    assert "M5" in msg
+    assert "BULLISH" in msg
+    assert "Z1@" in msg
+    assert "85%" in msg
+    assert "ทดสอบ" in msg
+
+
+@pytest.mark.asyncio
+async def test_send_analysis_alert_happy_path() -> None:
+    fake = _FakeClient(_FakeResponse(200))
+    n = TelegramNotifier(token="t", chat_id="123", enabled=True, client=fake)
+    ok = await n.send_analysis_alert(_analysis_payload())
+    assert ok is True
+    assert fake.call_count == 1
+    assert "/bott/sendMessage" in fake.last_url
+    assert fake.last_body["parse_mode"] == "HTML"
+    assert fake.last_body["chat_id"] == "123"
+
+
+@pytest.mark.asyncio
+async def test_send_analysis_alert_disabled_makes_no_call() -> None:
+    fake = _FakeClient(_FakeResponse(200))
+    n = TelegramNotifier(token="", chat_id="", enabled=False, client=fake)
+    ok = await n.send_analysis_alert(_analysis_payload())
+    assert ok is False
+    assert fake.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_send_analysis_alert_http_error_returns_false() -> None:
+    fake = _FakeClient(_FakeResponse(500, text="boom"))
+    n = TelegramNotifier(token="t", chat_id="123", enabled=True, client=fake)
+    ok = await n.send_analysis_alert(_analysis_payload())
+    assert ok is False
+
+
+@pytest.mark.asyncio
+async def test_send_analysis_alert_swallows_exceptions() -> None:
+    fake = _FakeClient(raise_exc=RuntimeError("network down"))
+    n = TelegramNotifier(token="t", chat_id="123", enabled=True, client=fake)
+    ok = await n.send_analysis_alert(_analysis_payload())
+    assert ok is False

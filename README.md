@@ -47,14 +47,21 @@ pytest -q
 
 | Variable | Description |
 |---|---|
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Service-role API key (server-side only) |
+| `SUPABASE_URL` | Supabase project URL (engine project) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service-role API key for the engine project (server-side only) |
+| `SUPABASE_CUSTOMERS_URL` | URL of the separate `aurum-customers` Supabase project |
+| `SUPABASE_CUSTOMERS_SERVICE_ROLE_KEY` | Service-role key for the `aurum-customers` project |
 | `METAAPI_TOKEN` | MetaApi Cloud SDK auth token |
 | `METAAPI_MASTER_ACCOUNT_ID` | MetaApi master account UUID |
 | `APP_ENV` | `production` / `staging` / `development` |
 | `PORT` | HTTP port (Railway provides this) |
 | `TIMEZONE` | IANA timezone (default `Asia/Bangkok`) |
 | `LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `AURUM_SNIPER_WEBHOOK_SECRET` | Shared secret for the `X-Webhook-Secret` header on the Sniper webhook |
+| `ANALYSIS_TABLE` | Table for analysis posts in the customers project (default `analysis_posts`) |
+| `TELEGRAM_ENABLED` | Enable Telegram notifications (engine intents + Sniper alerts) |
+| `TELEGRAM_BOT_TOKEN` | Bot token for @AurumAIEngineBot |
+| `TELEGRAM_CHAT_ID` | Destination chat/channel id for alerts |
 
 See `.env.example` for a template.
 
@@ -70,6 +77,36 @@ See `.env.example` for a template.
   "version": "0.1.0"
 }
 ```
+
+## Aurum Sniper webhook
+
+`POST /api/internal/aurum-sniper-alert` ingests Pine Script alert JSON.
+
+- **Auth:** `X-Webhook-Secret` header must match `AURUM_SNIPER_WEBHOOK_SECRET` (else `401`).
+- **Vocab normalization:** `buy`/`long`/`bull` → `bullish`, `sell`/`short`/`bear` → `bearish` before insert.
+- **Persist:** inserts into `analysis_posts` in the separate `aurum-customers` Supabase
+  project (service-role). Supabase Realtime then broadcasts the row to `/room` subscribers
+  via `postgres_changes`.
+- **Notify:** pushes a formatted alert to @AurumAIEngineBot via the engine's shared
+  `TelegramNotifier` (best-effort — a notify failure never fails the webhook).
+
+Request body:
+
+```json
+{
+  "symbol": "XAUUSD",
+  "timeframe": "M5",
+  "bias": "bullish",
+  "key_level": 2345.67,
+  "target_zones": [{ "id": "Z1", "price": 2350.0 }],
+  "risk_level": "medium",
+  "confidence": 85,
+  "note": "optional Thai text",
+  "timestamp_utc": "2026-06-06T00:00:00Z"
+}
+```
+
+Response: `200 {"post_id": "...", "broadcast": true}`
 
 ## Phase plan
 

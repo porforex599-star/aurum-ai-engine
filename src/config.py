@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = Field(..., min_length=1)
     SUPABASE_SERVICE_ROLE_KEY: str = Field(..., min_length=1)
 
+    # Separate Supabase project that owns customer-facing data (analysis posts).
+    SUPABASE_CUSTOMERS_URL: str = Field(..., min_length=1)
+    SUPABASE_CUSTOMERS_SERVICE_ROLE_KEY: str = Field(..., min_length=1)
+
     METAAPI_TOKEN: str = Field(..., min_length=1)
     METAAPI_MASTER_ACCOUNT_ID: str = Field(..., min_length=1)
 
@@ -53,6 +57,11 @@ class Settings(BaseSettings):
     # (product, symbol), suppress new opens for that pair for this many
     # seconds. Default 300s; override via env SIGNAL_COOLDOWN_SECONDS.
     signal_cooldown_seconds: float = Field(default=300.0)
+
+    # Aurum Sniper webhook (TradingView / Pine Script alert → analysis post).
+    # Persisted to the separate customers project; Telegram reuses telegram_*.
+    AURUM_SNIPER_WEBHOOK_SECRET: str = Field(default="")
+    ANALYSIS_TABLE: str = Field(default="analysis_posts")
 
 
 _settings: Settings | None = None
