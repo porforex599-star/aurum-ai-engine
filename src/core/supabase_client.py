@@ -41,6 +41,23 @@ class SupabaseClient:
     def get_client(self) -> Client | None:
         return self._client
 
+    async def insert_row(self, schema: str, table: str, row: dict) -> dict:
+        """Insert a single row via the service-role client and return it.
+
+        The synchronous postgrest call is offloaded to a worker thread so it
+        never blocks the event loop. The inserted row (including any
+        DB-generated columns such as `id`) is returned.
+        """
+        if self._client is None:
+            raise RuntimeError("Supabase client is not initialized")
+
+        def _insert() -> list[dict]:
+            response = self._client.schema(schema).table(table).insert(row).execute()
+            return response.data or []
+
+        data = await asyncio.to_thread(_insert)
+        return data[0] if data else {}
+
     async def shutdown(self) -> None:
         self._client = None
         self._connected = False

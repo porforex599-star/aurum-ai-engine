@@ -55,6 +55,11 @@ pytest -q
 | `PORT` | HTTP port (Railway provides this) |
 | `TIMEZONE` | IANA timezone (default `Asia/Bangkok`) |
 | `LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
+| `AURUM_SNIPER_WEBHOOK_SECRET` | Shared secret for the `X-Webhook-Secret` header on the Sniper webhook |
+| `ANALYSIS_SCHEMA` | Postgres schema for analysis posts (default `aurum-customers`) |
+| `ANALYSIS_TABLE` | Table for analysis posts (default `analysis_posts`) |
+| `TELEGRAM_BOT_TOKEN` | Bot token for @AurumAIEngineBot |
+| `TELEGRAM_CHAT_ID` | Destination chat/channel id for alerts |
 
 See `.env.example` for a template.
 
@@ -70,6 +75,34 @@ See `.env.example` for a template.
   "version": "0.1.0"
 }
 ```
+
+## Aurum Sniper webhook
+
+`POST /api/internal/aurum-sniper-alert` ingests Pine Script alert JSON.
+
+- **Auth:** `X-Webhook-Secret` header must match `AURUM_SNIPER_WEBHOOK_SECRET` (else `401`).
+- **Vocab normalization:** `buy`/`long`/`bull` → `bullish`, `sell`/`short`/`bear` → `bearish` before insert.
+- **Persist:** inserts into `aurum-customers.analysis_posts` (service-role). Supabase Realtime
+  then broadcasts the row to `/room` subscribers via `postgres_changes`.
+- **Notify:** pushes a formatted alert to @AurumAIEngineBot (best-effort).
+
+Request body:
+
+```json
+{
+  "symbol": "XAUUSD",
+  "timeframe": "M5",
+  "bias": "bullish",
+  "key_level": 2345.67,
+  "target_zones": [{ "id": "Z1", "price": 2350.0 }],
+  "risk_level": "medium",
+  "confidence": 85,
+  "note": "optional Thai text",
+  "timestamp_utc": "2026-06-06T00:00:00Z"
+}
+```
+
+Response: `200 {"post_id": "...", "broadcast": true}`
 
 ## Phase plan
 

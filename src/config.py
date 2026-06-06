@@ -23,6 +23,15 @@ class Settings(BaseSettings):
     TIMEZONE: str = "Asia/Bangkok"
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
+    # Aurum Sniper webhook (TradingView / Pine Script alert → analysis post)
+    AURUM_SNIPER_WEBHOOK_SECRET: str = ""
+    ANALYSIS_SCHEMA: str = "aurum-customers"
+    ANALYSIS_TABLE: str = "analysis_posts"
+
+    # Telegram notifier (@AurumAIEngineBot)
+    TELEGRAM_BOT_TOKEN: str = ""
+    TELEGRAM_CHAT_ID: str = ""
+
 
 _settings: Settings | None = None
 
