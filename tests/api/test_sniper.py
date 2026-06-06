@@ -86,6 +86,30 @@ def test_wrong_secret_returns_401(wired):
     assert response.status_code == 401
 
 
+def test_secret_via_query_param_succeeds(wired):
+    """TradingView can't send custom headers — ?secret= must work as a fallback."""
+    client, store, _ = wired
+    response = client.post(f"{ENDPOINT}?secret={SECRET}", json=VALID_PAYLOAD)
+    assert response.status_code == 200
+    assert response.json() == {"post_id": "post-123", "broadcast": True}
+    assert len(store.rows) == 1
+
+
+def test_wrong_query_param_secret_returns_401(wired):
+    client, _, _ = wired
+    response = client.post(f"{ENDPOINT}?secret=nope", json=VALID_PAYLOAD)
+    assert response.status_code == 401
+
+
+def test_header_takes_precedence_over_query_param(wired):
+    """A valid header authenticates even if the query param is wrong/absent."""
+    client, _, _ = wired
+    response = client.post(
+        f"{ENDPOINT}?secret=nope", json=VALID_PAYLOAD, headers={"X-Webhook-Secret": SECRET}
+    )
+    assert response.status_code == 200
+
+
 def test_valid_alert_persists_and_broadcasts(wired):
     client, store, notifier = wired
     response = client.post(ENDPOINT, json=VALID_PAYLOAD, headers={"X-Webhook-Secret": SECRET})

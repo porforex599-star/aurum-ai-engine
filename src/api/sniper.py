@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import secrets
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from loguru import logger
 
 from src.config import get_settings
@@ -64,11 +64,13 @@ def _verify_secret(provided: str | None) -> None:
 async def aurum_sniper_alert(
     payload: SniperAlertPayload,
     x_webhook_secret: str | None = Header(default=None, alias="X-Webhook-Secret"),
+    secret: str | None = Query(default=None),
     store: SupabaseClient = Depends(get_analysis_store),
     notifier: TelegramNotifier | None = Depends(get_analysis_notifier),
 ) -> SniperAlertResponse:
-    # 1. Authenticate.
-    _verify_secret(x_webhook_secret)
+    # 1. Authenticate. TradingView can't send custom headers, so the
+    #    `?secret=` query param is accepted as a fallback to the header.
+    _verify_secret(x_webhook_secret or secret)
 
     # 2. Vocab is already normalized by SniperAlertPayload validators
     #    (buy/long → bullish, sell/short → bearish).
