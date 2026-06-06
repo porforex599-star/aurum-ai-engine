@@ -83,6 +83,8 @@ See `.env.example` for a template.
 `POST /api/internal/aurum-sniper-alert` ingests Pine Script alert JSON.
 
 - **Auth:** `X-Webhook-Secret` header must match `AURUM_SNIPER_WEBHOOK_SECRET` (else `401`).
+  TradingView can't send custom headers, so a `?secret=…` query param is accepted as a
+  fallback when the header is absent.
 - **Vocab normalization:** `buy`/`long`/`bull` → `bullish`, `sell`/`short`/`bear` → `bearish` before insert.
 - **Persist:** inserts into `analysis_posts` in the separate `aurum-customers` Supabase
   project (service-role). Supabase Realtime then broadcasts the row to `/room` subscribers
