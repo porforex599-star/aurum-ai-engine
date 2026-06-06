@@ -47,8 +47,10 @@ pytest -q
 
 | Variable | Description |
 |---|---|
-| `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_SERVICE_ROLE_KEY` | Service-role API key (server-side only) |
+| `SUPABASE_URL` | Supabase project URL (engine project) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Service-role API key for the engine project (server-side only) |
+| `SUPABASE_CUSTOMERS_URL` | URL of the separate `aurum-customers` Supabase project |
+| `SUPABASE_CUSTOMERS_SERVICE_ROLE_KEY` | Service-role key for the `aurum-customers` project |
 | `METAAPI_TOKEN` | MetaApi Cloud SDK auth token |
 | `METAAPI_MASTER_ACCOUNT_ID` | MetaApi master account UUID |
 | `APP_ENV` | `production` / `staging` / `development` |
@@ -56,8 +58,7 @@ pytest -q
 | `TIMEZONE` | IANA timezone (default `Asia/Bangkok`) |
 | `LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `AURUM_SNIPER_WEBHOOK_SECRET` | Shared secret for the `X-Webhook-Secret` header on the Sniper webhook |
-| `ANALYSIS_SCHEMA` | Postgres schema for analysis posts (default `aurum-customers`) |
-| `ANALYSIS_TABLE` | Table for analysis posts (default `analysis_posts`) |
+| `ANALYSIS_TABLE` | Table for analysis posts in the customers project (default `analysis_posts`) |
 | `TELEGRAM_BOT_TOKEN` | Bot token for @AurumAIEngineBot |
 | `TELEGRAM_CHAT_ID` | Destination chat/channel id for alerts |
 
@@ -82,8 +83,9 @@ See `.env.example` for a template.
 
 - **Auth:** `X-Webhook-Secret` header must match `AURUM_SNIPER_WEBHOOK_SECRET` (else `401`).
 - **Vocab normalization:** `buy`/`long`/`bull` → `bullish`, `sell`/`short`/`bear` → `bearish` before insert.
-- **Persist:** inserts into `aurum-customers.analysis_posts` (service-role). Supabase Realtime
-  then broadcasts the row to `/room` subscribers via `postgres_changes`.
+- **Persist:** inserts into `analysis_posts` in the separate `aurum-customers` Supabase
+  project (service-role). Supabase Realtime then broadcasts the row to `/room` subscribers
+  via `postgres_changes`.
 - **Notify:** pushes a formatted alert to @AurumAIEngineBot (best-effort).
 
 Request body:

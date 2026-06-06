@@ -11,7 +11,7 @@ from src.api.health import router as health_router
 from src.api.sniper import router as sniper_router
 from src.config import get_settings
 from src.core.metaapi_client import get_metaapi_client
-from src.core.supabase_client import get_supabase_client
+from src.core.supabase_client import get_customers_client, get_supabase_client
 
 
 def _configure_logging(level: str) -> None:
@@ -34,6 +34,9 @@ async def lifespan(app: FastAPI):
     supabase.connect()
     await supabase.ping()
 
+    customers = get_customers_client()
+    customers.connect()
+
     metaapi = get_metaapi_client()
     try:
         await metaapi.connect()
@@ -45,6 +48,7 @@ async def lifespan(app: FastAPI):
     finally:
         logger.info("Shutting down Aurum AI Engine")
         await metaapi.shutdown()
+        await customers.shutdown()
         await supabase.shutdown()
 
 

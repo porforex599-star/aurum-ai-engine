@@ -1,9 +1,9 @@
 """Aurum Sniper alert webhook.
 
 Receives Pine Script alert JSON, normalizes vocabulary, persists it to
-`aurum-customers.analysis_posts` (which Supabase Realtime broadcasts to
-subscribed `/room` clients via `postgres_changes`), and pushes a Telegram
-notification to @AurumAIEngineBot.
+`analysis_posts` in the separate `aurum-customers` Supabase project (which
+Supabase Realtime broadcasts to subscribed `/room` clients via
+`postgres_changes`), and pushes a Telegram notification to @AurumAIEngineBot.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from fastapi import APIRouter, Header, HTTPException, status
 from loguru import logger
 
 from src.config import get_settings
-from src.core.supabase_client import get_supabase_client
+from src.core.supabase_client import get_customers_client
 from src.core.telegram_notifier import get_telegram_notifier
 from src.schemas.sniper import SniperAlertPayload, SniperAlertResponse
 
@@ -55,11 +55,11 @@ async def aurum_sniper_alert(
     #    (buy/long → bullish, sell/short → bearish).
     settings = get_settings()
 
-    # 3. Persist. Realtime then broadcasts the row to /room subscribers.
-    supabase = get_supabase_client()
+    # 3. Persist to the customers project. Realtime then broadcasts the row
+    #    to /room subscribers via postgres_changes.
+    customers = get_customers_client()
     try:
-        inserted = await supabase.insert_row(
-            settings.ANALYSIS_SCHEMA,
+        inserted = await customers.insert_row(
             settings.ANALYSIS_TABLE,
             payload.to_post_row(),
         )

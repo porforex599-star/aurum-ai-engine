@@ -4,6 +4,8 @@ import os
 
 os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
 os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key")
+os.environ.setdefault("SUPABASE_CUSTOMERS_URL", "https://customers.example.supabase.co")
+os.environ.setdefault("SUPABASE_CUSTOMERS_SERVICE_ROLE_KEY", "test-customers-service-role-key")
 os.environ.setdefault("METAAPI_TOKEN", "test-metaapi-token")
 os.environ.setdefault("METAAPI_MASTER_ACCOUNT_ID", "00000000-0000-0000-0000-000000000000")
 os.environ.setdefault("APP_ENV", "development")
@@ -57,9 +59,11 @@ class _FakeSupabaseClient:
 def test_health_endpoint(monkeypatch) -> None:
     fake_meta = _FakeMetaApiClient()
     fake_supa = _FakeSupabaseClient()
+    fake_customers = _FakeSupabaseClient()
 
     monkeypatch.setattr(metaapi_module, "_client", fake_meta)
     monkeypatch.setattr(supabase_module, "_client", fake_supa)
+    monkeypatch.setattr(supabase_module, "_customers_client", fake_customers)
 
     with TestClient(app) as client:
         response = client.get("/health")

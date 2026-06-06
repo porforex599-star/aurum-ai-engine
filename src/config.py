@@ -15,6 +15,10 @@ class Settings(BaseSettings):
     SUPABASE_URL: str = Field(..., min_length=1)
     SUPABASE_SERVICE_ROLE_KEY: str = Field(..., min_length=1)
 
+    # Separate Supabase project that owns customer-facing data (analysis posts).
+    SUPABASE_CUSTOMERS_URL: str = Field(..., min_length=1)
+    SUPABASE_CUSTOMERS_SERVICE_ROLE_KEY: str = Field(..., min_length=1)
+
     METAAPI_TOKEN: str = Field(..., min_length=1)
     METAAPI_MASTER_ACCOUNT_ID: str = Field(..., min_length=1)
 
@@ -25,7 +29,6 @@ class Settings(BaseSettings):
 
     # Aurum Sniper webhook (TradingView / Pine Script alert → analysis post)
     AURUM_SNIPER_WEBHOOK_SECRET: str = ""
-    ANALYSIS_SCHEMA: str = "aurum-customers"
     ANALYSIS_TABLE: str = "analysis_posts"
 
     # Telegram notifier (@AurumAIEngineBot)
