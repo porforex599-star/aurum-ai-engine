@@ -3,23 +3,25 @@ from __future__ import annotations
 import os
 
 os.environ.setdefault("SUPABASE_URL", "https://example.supabase.co")
-os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test-service-role-key")
+os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "test")
 os.environ.setdefault("SUPABASE_CUSTOMERS_URL", "https://customers.example.supabase.co")
-os.environ.setdefault("SUPABASE_CUSTOMERS_SERVICE_ROLE_KEY", "test-customers-service-role-key")
-os.environ.setdefault("METAAPI_TOKEN", "test-metaapi-token")
+os.environ.setdefault("SUPABASE_CUSTOMERS_SERVICE_ROLE_KEY", "test-customers")
+os.environ.setdefault("METAAPI_TOKEN", "test")
 os.environ.setdefault("METAAPI_MASTER_ACCOUNT_ID", "00000000-0000-0000-0000-000000000000")
 os.environ.setdefault("APP_ENV", "development")
 os.environ.setdefault("LOG_LEVEL", "INFO")
 os.environ["AURUM_SNIPER_WEBHOOK_SECRET"] = "test-webhook-secret"
 
 import pytest  # noqa: E402
+from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from src import config as config_module  # noqa: E402
-from src.core import metaapi_client as metaapi_module  # noqa: E402
-from src.core import supabase_client as supabase_module  # noqa: E402
-from src.core import telegram_notifier as telegram_module  # noqa: E402
-from src.main import app  # noqa: E402
+from src.api.sniper import (  # noqa: E402
+    get_analysis_notifier,
+    get_analysis_store,
+    router as sniper_router,
+)
+from src.config import reset_settings  # noqa: E402
 
 ENDPOINT = "/api/internal/aurum-sniper-alert"
 SECRET = "test-webhook-secret"
@@ -37,70 +39,39 @@ VALID_PAYLOAD = {
 }
 
 
-class _FakeMetaApiClient:
-    async def connect(self) -> None:
-        pass
-
-    async def shutdown(self) -> None:
-        pass
-
-    def is_connected(self) -> bool:
-        return True
-
-    def get_account(self):
-        return None
-
-
-class _FakeSupabaseClient:
+class _FakeStore:
     def __init__(self) -> None:
         self.rows: list[tuple[str, dict]] = []
-        self._connected = False
-
-    def connect(self) -> None:
-        self._connected = True
-
-    async def ping(self) -> bool:
-        return self._connected
-
-    def is_connected(self) -> bool:
-        return self._connected
-
-    def get_client(self):
-        return object() if self._connected else None
-
-    async def shutdown(self) -> None:
-        self._connected = False
 
     async def insert_row(self, table: str, row: dict) -> dict:
         self.rows.append((table, row))
         return {"id": "post-123", **row}
 
 
-class _FakeTelegramNotifier:
+class _FakeNotifier:
     def __init__(self) -> None:
         self.sent: list = []
 
-    def is_configured(self) -> bool:
-        return True
-
-    async def send_analysis(self, payload) -> bool:
+    async def send_analysis_alert(self, payload) -> bool:
         self.sent.append(payload)
         return True
 
 
+def _build_app(store, notifier):
+    reset_settings()  # pick up AURUM_SNIPER_WEBHOOK_SECRET from env
+    app = FastAPI()
+    app.include_router(sniper_router)
+    app.dependency_overrides[get_analysis_store] = lambda: store
+    app.dependency_overrides[get_analysis_notifier] = lambda: notifier
+    return app
+
+
 @pytest.fixture
-def wired(monkeypatch):
-    """Reset the settings cache (to pick up the webhook secret) and inject fakes."""
-    monkeypatch.setattr(config_module, "_settings", None)
-    fake_supa = _FakeSupabaseClient()
-    fake_customers = _FakeSupabaseClient()
-    fake_tg = _FakeTelegramNotifier()
-    monkeypatch.setattr(metaapi_module, "_client", _FakeMetaApiClient())
-    monkeypatch.setattr(supabase_module, "_client", fake_supa)
-    monkeypatch.setattr(supabase_module, "_customers_client", fake_customers)
-    monkeypatch.setattr(telegram_module, "_notifier", fake_tg)
-    with TestClient(app) as client:
-        yield client, fake_customers, fake_tg
+def wired():
+    store = _FakeStore()
+    notifier = _FakeNotifier()
+    client = TestClient(_build_app(store, notifier))
+    return client, store, notifier
 
 
 def test_missing_secret_returns_401(wired):
@@ -116,42 +87,41 @@ def test_wrong_secret_returns_401(wired):
 
 
 def test_valid_alert_persists_and_broadcasts(wired):
-    client, fake_customers, fake_tg = wired
+    client, store, notifier = wired
     response = client.post(ENDPOINT, json=VALID_PAYLOAD, headers={"X-Webhook-Secret": SECRET})
 
     assert response.status_code == 200
-    body = response.json()
-    assert body == {"post_id": "post-123", "broadcast": True}
+    assert response.json() == {"post_id": "post-123", "broadcast": True}
 
     # Persisted into the customers project's analysis_posts table (public schema).
-    assert len(fake_customers.rows) == 1
-    table, row = fake_customers.rows[0]
+    assert len(store.rows) == 1
+    table, row = store.rows[0]
     assert table == "analysis_posts"
     assert row["symbol"] == "XAUUSD"
     assert row["bias"] == "bullish"
 
     # Telegram notified.
-    assert len(fake_tg.sent) == 1
+    assert len(notifier.sent) == 1
 
 
 def test_vocab_normalization_buy_to_bullish(wired):
-    client, fake_customers, fake_tg = wired
+    client, store, notifier = wired
     payload = {**VALID_PAYLOAD, "bias": "buy"}
     response = client.post(ENDPOINT, json=payload, headers={"X-Webhook-Secret": SECRET})
 
     assert response.status_code == 200
-    _, row = fake_customers.rows[0]
+    _, row = store.rows[0]
     assert row["bias"] == "bullish"
-    assert fake_tg.sent[0].bias == "bullish"
+    assert notifier.sent[0].bias == "bullish"
 
 
 def test_vocab_normalization_short_to_bearish(wired):
-    client, fake_customers, _ = wired
+    client, store, _ = wired
     payload = {**VALID_PAYLOAD, "bias": "SHORT"}
     response = client.post(ENDPOINT, json=payload, headers={"X-Webhook-Secret": SECRET})
 
     assert response.status_code == 200
-    _, row = fake_customers.rows[0]
+    _, row = store.rows[0]
     assert row["bias"] == "bearish"
 
 
@@ -160,3 +130,12 @@ def test_invalid_confidence_returns_422(wired):
     payload = {**VALID_PAYLOAD, "confidence": 150}
     response = client.post(ENDPOINT, json=payload, headers={"X-Webhook-Secret": SECRET})
     assert response.status_code == 422
+
+
+def test_notification_failure_does_not_fail_request(wired):
+    """A missing/skipped notifier (None) must not fail the webhook."""
+    client, store, _ = wired
+    client.app.dependency_overrides[get_analysis_notifier] = lambda: None
+    response = client.post(ENDPOINT, json=VALID_PAYLOAD, headers={"X-Webhook-Secret": SECRET})
+    assert response.status_code == 200
+    assert len(store.rows) == 1

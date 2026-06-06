@@ -59,6 +59,7 @@ pytest -q
 | `LOG_LEVEL` | `DEBUG` / `INFO` / `WARNING` / `ERROR` |
 | `AURUM_SNIPER_WEBHOOK_SECRET` | Shared secret for the `X-Webhook-Secret` header on the Sniper webhook |
 | `ANALYSIS_TABLE` | Table for analysis posts in the customers project (default `analysis_posts`) |
+| `TELEGRAM_ENABLED` | Enable Telegram notifications (engine intents + Sniper alerts) |
 | `TELEGRAM_BOT_TOKEN` | Bot token for @AurumAIEngineBot |
 | `TELEGRAM_CHAT_ID` | Destination chat/channel id for alerts |
 
@@ -86,7 +87,8 @@ See `.env.example` for a template.
 - **Persist:** inserts into `analysis_posts` in the separate `aurum-customers` Supabase
   project (service-role). Supabase Realtime then broadcasts the row to `/room` subscribers
   via `postgres_changes`.
-- **Notify:** pushes a formatted alert to @AurumAIEngineBot (best-effort).
+- **Notify:** pushes a formatted alert to @AurumAIEngineBot via the engine's shared
+  `TelegramNotifier` (best-effort — a notify failure never fails the webhook).
 
 Request body:
 

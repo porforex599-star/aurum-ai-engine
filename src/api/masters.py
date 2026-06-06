@@ -1,0 +1,185 @@
+"""Phase 7 Stage 1 — master-account registry endpoints (read + admin writes).
+
+All endpoints reuse the Phase 6 `X-Admin-Key` gate (`admin._verify_admin_key`):
+503 if ADMIN_KEY isn't configured, 401 on mismatch.
+
+Stage 1 scope: these endpoints operate purely against the `master_accounts`
+table. The engine is NOT yet wired to use them — it keeps trading off the single
+env-var master with the documented gold_ai fallback. Engine refactor = Stage 2.
+
+Endpoints:
+  GET    /masters                 — list all masters + assignment + status
+  POST   /masters                 — register a new (standby) master
+  POST   /masters/{id}/assign     — assign a product (demotes prior holder)
+  POST   /masters/{id}/unassign   — clear assignment → standby
+  DELETE /masters/{id}            — only when standby; else 409
+"""
+
+from __future__ import annotations
+
+from fastapi import APIRouter, Depends, HTTPException
+from loguru import logger
+from pydantic import BaseModel, Field
+
+from src.api.admin import _verify_admin_key
+from src.core.master_account_service import (
+    PRODUCTS,
+    MasterAccountError,
+    MasterAccountService,
+)
+from src.core.metaapi_client import ProvisioningError
+from src.engine.runtime import AppRuntime, get_runtime
+
+router = APIRouter(prefix="/masters", tags=["masters"])
+
+
+def _service(rt: AppRuntime) -> MasterAccountService:
+    return rt.master_accounts
+
+
+class RegisterMasterBody(BaseModel):
+    login: str = Field(..., min_length=1)
+    broker: str = Field(..., min_length=1)
+    server: str = Field(..., min_length=1)
+    # Optional — the Add-master UI no longer collects currency. When omitted it
+    # is stored NULL and auto-filled from MetaApi on the first successful
+    # account-info snapshot (MT5 reports the broker currency, e.g. USD/USC/EUR).
+    currency: str | None = Field(default=None)
+    # Supply EXACTLY ONE of (metaapi_account_id, password) — enforced in the
+    # handler. metaapi_account_id adopts a pre-provisioned MetaApi account
+    # (the original flow); password auto-provisions a brand-new one.
+    metaapi_account_id: str | None = Field(default=None)
+    metaapi_region: str = Field(default="eu-west", min_length=1)
+    # Write-only: the MT5 account password, forwarded to the MetaApi SDK once to
+    # provision the account. Never logged, never persisted, never serialized.
+    password: str | None = Field(default=None, exclude=True, repr=False)
+    notes: str | None = None
+
+
+class AssignBody(BaseModel):
+    product: str
+
+
+def _raise_from(err: MasterAccountError) -> None:
+    raise HTTPException(status_code=err.status_code, detail=err.message)
+
+
+@router.get("")
+async def list_masters(
+    rt: AppRuntime = Depends(get_runtime),
+    _: None = Depends(_verify_admin_key),
+) -> dict:
+    """List every registered master with its current product + status."""
+    masters = await _service(rt).list_masters()
+    return {"count": len(masters), "masters": masters}
+
+
+@router.post("")
+async def register_master(
+    body: RegisterMasterBody,
+    rt: AppRuntime = Depends(get_runtime),
+    _: None = Depends(_verify_admin_key),
+) -> dict:
+    """Register a new master account. Starts in `standby` (unassigned).
+
+    Two mutually-exclusive ways to supply the MetaApi account:
+      * `metaapi_account_id` — adopt a pre-provisioned account (original flow,
+        unchanged);
+      * `password` — auto-provision a new MetaApi account from the MT5 login +
+        server, then store the resulting id/region/currency.
+    """
+    has_id = bool(body.metaapi_account_id)
+    has_password = bool(body.password)
+    if not has_id and not has_password:
+        raise HTTPException(status_code=422, detail="missing_credentials")
+    if has_id and has_password:
+        raise HTTPException(status_code=422, detail="ambiguous_credentials")
+
+    metaapi_account_id = body.metaapi_account_id
+    metaapi_region = body.metaapi_region
+    currency = body.currency
+
+    if has_password:
+        # Password path — provision a fresh MetaApi account. The password is
+        # passed to the SDK only; it is never logged here or persisted below.
+        try:
+            provisioned = await rt.provision_master_account(
+                login=body.login,
+                password=body.password,
+                server=body.server,
+            )
+        except ProvisioningError as err:
+            logger.warning(
+                "master provisioning failed: login={} code={}", body.login, err.code
+            )
+            raise HTTPException(status_code=err.status_code, detail=err.code) from err
+        metaapi_account_id = provisioned.metaapi_account_id
+        # MetaApi is authoritative for region; an explicit currency wins, else
+        # use the broker base currency MetaApi reports.
+        metaapi_region = provisioned.metaapi_region or metaapi_region
+        currency = currency or provisioned.currency
+
+    try:
+        master = await _service(rt).register_master(
+            login=body.login,
+            broker=body.broker,
+            server=body.server,
+            currency=currency,
+            metaapi_account_id=metaapi_account_id,
+            metaapi_region=metaapi_region,
+            notes=body.notes,
+        )
+    except MasterAccountError as err:
+        _raise_from(err)
+    logger.info("master registered: login={} id={}", body.login, master.get("id"))
+    return master
+
+
+@router.post("/{master_id}/assign")
+async def assign_master(
+    master_id: str,
+    body: AssignBody,
+    rt: AppRuntime = Depends(get_runtime),
+    _: None = Depends(_verify_admin_key),
+) -> dict:
+    """Assign a product to this master, demoting any prior holder to standby."""
+    if body.product not in PRODUCTS:
+        raise HTTPException(
+            status_code=400, detail=f"unknown product: {body.product!r}"
+        )
+    try:
+        master = await _service(rt).assign(master_id, body.product)
+    except MasterAccountError as err:
+        _raise_from(err)
+    logger.info("master {} assigned to {}", master_id, body.product)
+    return master
+
+
+@router.post("/{master_id}/unassign")
+async def unassign_master(
+    master_id: str,
+    rt: AppRuntime = Depends(get_runtime),
+    _: None = Depends(_verify_admin_key),
+) -> dict:
+    """Clear this master's product assignment → standby."""
+    try:
+        master = await _service(rt).unassign(master_id)
+    except MasterAccountError as err:
+        _raise_from(err)
+    logger.info("master {} unassigned", master_id)
+    return master
+
+
+@router.delete("/{master_id}")
+async def delete_master(
+    master_id: str,
+    rt: AppRuntime = Depends(get_runtime),
+    _: None = Depends(_verify_admin_key),
+) -> dict:
+    """Delete a master — only when it is in `standby`; otherwise 409."""
+    try:
+        await _service(rt).delete_master(master_id)
+    except MasterAccountError as err:
+        _raise_from(err)
+    logger.info("master {} deleted", master_id)
+    return {"deleted": True, "id": master_id}

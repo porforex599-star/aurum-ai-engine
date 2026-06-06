@@ -10,20 +10,37 @@ from __future__ import annotations
 
 import secrets
 
-from fastapi import APIRouter, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from loguru import logger
 
 from src.config import get_settings
-from src.core.supabase_client import get_customers_client
-from src.core.telegram_notifier import get_telegram_notifier
+from src.core.supabase_client import SupabaseClient, get_customers_client
+from src.engine.runtime import get_runtime
+from src.notifier.telegram import TelegramNotifier
 from src.schemas.sniper import SniperAlertPayload, SniperAlertResponse
 
 router = APIRouter()
 
 
+def get_analysis_store() -> SupabaseClient:
+    """The Supabase client for the customers project (where analysis_posts live)."""
+    return get_customers_client()
+
+
+def get_analysis_notifier() -> TelegramNotifier | None:
+    """The engine's Telegram notifier, or None if the runtime isn't up yet.
+
+    Notifications are best-effort, so a missing runtime must not fail the
+    webhook — we just skip the Telegram step.
+    """
+    try:
+        return get_runtime().notifier
+    except RuntimeError:
+        return None
+
+
 def _verify_secret(provided: str | None) -> None:
-    settings = get_settings()
-    expected = settings.AURUM_SNIPER_WEBHOOK_SECRET
+    expected = get_settings().AURUM_SNIPER_WEBHOOK_SECRET
 
     if not expected:
         logger.error("AURUM_SNIPER_WEBHOOK_SECRET is not configured — rejecting webhook")
@@ -47,20 +64,20 @@ def _verify_secret(provided: str | None) -> None:
 async def aurum_sniper_alert(
     payload: SniperAlertPayload,
     x_webhook_secret: str | None = Header(default=None, alias="X-Webhook-Secret"),
+    store: SupabaseClient = Depends(get_analysis_store),
+    notifier: TelegramNotifier | None = Depends(get_analysis_notifier),
 ) -> SniperAlertResponse:
     # 1. Authenticate.
     _verify_secret(x_webhook_secret)
 
     # 2. Vocab is already normalized by SniperAlertPayload validators
     #    (buy/long → bullish, sell/short → bearish).
-    settings = get_settings()
 
     # 3. Persist to the customers project. Realtime then broadcasts the row
     #    to /room subscribers via postgres_changes.
-    customers = get_customers_client()
     try:
-        inserted = await customers.insert_row(
-            settings.ANALYSIS_TABLE,
+        inserted = await store.insert_row(
+            get_settings().ANALYSIS_TABLE,
             payload.to_post_row(),
         )
     except Exception as exc:  # noqa: BLE001
@@ -87,6 +104,7 @@ async def aurum_sniper_alert(
     )
 
     # 4. Notify Telegram (best-effort; never fails the request).
-    await get_telegram_notifier().send_analysis(payload)
+    if notifier is not None:
+        await notifier.send_analysis_alert(payload)
 
     return SniperAlertResponse(post_id=str(post_id), broadcast=True)
