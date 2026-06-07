@@ -42,6 +42,10 @@ class SniperAlertPayload(BaseModel):
     timeframe: str = Field(..., min_length=1)
     bias: Bias
     key_level: float
+    # Optional for backward compatibility with Phase 3 callers that predate
+    # these fields. Dropped from the persisted row when None (see to_post_row).
+    invalidation_price: float | None = None
+    rr_ratio: float | None = None
     target_zones: list[TargetZone] = Field(default_factory=list)
     risk_level: RiskLevel
     confidence: int = Field(..., ge=0, le=100)
