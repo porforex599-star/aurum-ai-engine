@@ -200,3 +200,78 @@ def test_webhook_backward_compat_without_new_fields(wired):
     # Defaults are None on the parsed payload.
     assert notifier.sent[0].invalidation_price is None
     assert notifier.sent[0].rr_ratio is None
+
+
+def test_webhook_accepts_phase4_chart_context_fields(wired):
+    """Full Pine V.3 payload: pattern_markers, sd_zones, candles + zone labels
+    are validated and persisted into the analysis_posts row."""
+    client, store, notifier = wired
+    payload = {
+        **VALID_PAYLOAD,
+        "target_zones": [
+            {"id": "Z1", "label": "TP1", "price": 2350.0},
+            {"id": "Z2", "label": "TP2", "price": 2355.0},
+        ],
+        "pattern_markers": [
+            {"time": 1717689600, "kind": "3ls_bull", "price": 2346.0},
+            {"time": 1717693200, "kind": "engulf_bull", "price": 2347.5},
+        ],
+        "sd_zones": [
+            {"tf": "2H", "type": "demand", "high": 2344.0, "low": 2340.0},
+            {"tf": "30M", "type": "supply", "high": 2360.0, "low": 2358.0, "mitigated": True},
+            {"tf": "5M", "type": "demand", "high": 2342.0, "low": 2341.0},
+        ],
+        "candles": [
+            {"time": 1717689600, "open": 2345.0, "high": 2347.0, "low": 2344.0, "close": 2346.0},
+            {"time": 1717689900, "open": 2346.0, "high": 2348.0, "low": 2345.5, "close": 2347.0},
+            {"time": 1717690200, "open": 2347.0, "high": 2349.0, "low": 2346.5, "close": 2348.0},
+            {"time": 1717690500, "open": 2348.0, "high": 2350.0, "low": 2347.5, "close": 2349.0},
+            {"time": 1717690800, "open": 2349.0, "high": 2351.0, "low": 2348.5, "close": 2350.0},
+        ],
+    }
+    response = client.post(ENDPOINT, json=payload, headers={"X-Webhook-Secret": SECRET})
+
+    assert response.status_code == 200
+    assert len(store.rows) == 1
+    _, row = store.rows[0]
+
+    assert len(row["pattern_markers"]) == 2
+    assert len(row["sd_zones"]) == 3
+    assert len(row["candles"]) == 5
+    assert row["pattern_markers"][0]["kind"] == "3ls_bull"
+    assert row["sd_zones"][1]["mitigated"] is True
+    assert row["target_zones"][0]["label"] == "TP1"
+    assert row["target_zones"][1]["label"] == "TP2"
+
+    # The validated payload handed to the notifier carries the new fields too.
+    assert len(notifier.sent[0].pattern_markers) == 2
+    assert len(notifier.sent[0].sd_zones) == 3
+    assert len(notifier.sent[0].candles) == 5
+
+
+def test_webhook_backward_compat_phase4_defaults(wired):
+    """Callers that omit the Phase 4 fields still succeed.
+
+    pattern_markers / sd_zones default to [] (matching the DB NOT NULL DEFAULT
+    '[]' columns); candles is None and dropped from the row so its DB default
+    (null) applies. target_zones without a label default to "TP".
+    """
+    client, store, notifier = wired
+    response = client.post(ENDPOINT, json=VALID_PAYLOAD, headers={"X-Webhook-Secret": SECRET})
+
+    assert response.status_code == 200
+    assert len(store.rows) == 1
+    _, row = store.rows[0]
+
+    # List fields are present and empty; candles dropped via exclude_none.
+    assert row["pattern_markers"] == []
+    assert row["sd_zones"] == []
+    assert "candles" not in row
+
+    # VALID_PAYLOAD's zones omit label → default "TP".
+    assert all(z["label"] == "TP" for z in row["target_zones"])
+
+    # Parsed payload defaults.
+    assert notifier.sent[0].pattern_markers == []
+    assert notifier.sent[0].sd_zones == []
+    assert notifier.sent[0].candles is None

@@ -442,6 +442,30 @@ def test_format_analysis_message_omits_invalidation_and_rr_when_absent() -> None
     assert "N/A" not in msg
 
 
+def test_format_analysis_message_renders_phase4_counts_when_present() -> None:
+    msg = format_analysis_message(
+        _analysis_payload(
+            pattern_markers=[
+                {"time": 1717689600, "kind": "3ls_bull", "price": 2346.0},
+                {"time": 1717693200, "kind": "engulf_bull", "price": 2347.5},
+            ],
+            sd_zones=[
+                {"tf": "2H", "type": "demand", "high": 2344.0, "low": 2340.0},
+                {"tf": "30M", "type": "supply", "high": 2360.0, "low": 2358.0},
+                {"tf": "5M", "type": "demand", "high": 2342.0, "low": 2341.0},
+            ],
+        )
+    )
+    assert "Patterns: 2" in msg
+    assert "Zones: 3" in msg
+
+
+def test_format_analysis_message_omits_phase4_counts_when_absent() -> None:
+    msg = format_analysis_message(_analysis_payload())
+    assert "Patterns:" not in msg
+    assert "Zones:" not in msg
+
+
 @pytest.mark.asyncio
 async def test_send_analysis_alert_happy_path() -> None:
     fake = _FakeClient(_FakeResponse(200))

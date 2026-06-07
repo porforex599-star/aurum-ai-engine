@@ -100,13 +100,27 @@ Request body:
   "timeframe": "M5",
   "bias": "bullish",
   "key_level": 2345.67,
-  "target_zones": [{ "id": "Z1", "price": 2350.0 }],
+  "invalidation_price": 2330.5,
+  "rr_ratio": 2.8,
+  "target_zones": [{ "id": "Z1", "label": "TP1", "price": 2350.0 }],
   "risk_level": "medium",
   "confidence": 85,
   "note": "optional Thai text",
-  "timestamp_utc": "2026-06-06T00:00:00Z"
+  "timestamp_utc": "2026-06-06T00:00:00Z",
+  "pattern_markers": [{ "time": 1717689600, "kind": "3ls_bull", "price": 2346.0 }],
+  "sd_zones": [{ "tf": "2H", "type": "demand", "high": 2344.0, "low": 2340.0, "mitigated": false }],
+  "candles": [{ "time": 1717689600, "open": 2345.0, "high": 2347.0, "low": 2344.0, "close": 2346.0 }]
 }
 ```
+
+Optional fields are backward-compatible — alerts that omit them still succeed:
+
+- `invalidation_price`, `rr_ratio`, `candles` default to `null` (dropped from the
+  inserted row so the DB column default applies).
+- `pattern_markers` and `sd_zones` default to `[]` (matching the `analysis_posts`
+  `NOT NULL DEFAULT '[]'` columns).
+- `target_zones[].label` defaults to `"TP"` when Pine doesn't send one (Pine V.2
+  sends `"TP1"`, `"TP2"`, …).
 
 Response: `200 {"post_id": "...", "broadcast": true}`
 

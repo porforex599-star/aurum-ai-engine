@@ -32,7 +32,38 @@ _BIAS_ALIASES: dict[str, Bias] = {
 
 class TargetZone(BaseModel):
     id: str
+    # Pine V.2 labels its targets "TP1", "TP2", … — default keeps Phase 3
+    # callers (which only sent id/price) working unchanged.
+    label: str = "TP"
     price: float
+
+
+class PatternMarker(BaseModel):
+    """A Pine V.3 chart marker for a detected candlestick pattern."""
+
+    time: int  # UNIX seconds
+    kind: Literal["3ls_bull", "3ls_bear", "engulf_bull", "engulf_bear"]
+    price: float
+
+
+class SdZone(BaseModel):
+    """A supply/demand zone emitted by Pine V.3, scoped to a timeframe."""
+
+    tf: str  # "2H", "30M", etc.
+    type: Literal["supply", "demand"]
+    high: float
+    low: float
+    mitigated: bool = False
+
+
+class Candle(BaseModel):
+    """A single OHLC candle (Pine V.3 chart context)."""
+
+    time: int  # UNIX seconds
+    open: float
+    high: float
+    low: float
+    close: float
 
 
 class SniperAlertPayload(BaseModel):
@@ -51,6 +82,12 @@ class SniperAlertPayload(BaseModel):
     confidence: int = Field(..., ge=0, le=100)
     note: str | None = None
     timestamp_utc: datetime | None = None
+    # Phase 4 (Pine V.3) chart-context fields. The list fields default to []
+    # (matching the `analysis_posts` NOT NULL DEFAULT '[]' columns); `candles`
+    # is nullable and dropped from the row when omitted (see to_post_row).
+    pattern_markers: list[PatternMarker] = Field(default_factory=list)
+    sd_zones: list[SdZone] = Field(default_factory=list)
+    candles: list[Candle] | None = None
 
     @field_validator("bias", mode="before")
     @classmethod
