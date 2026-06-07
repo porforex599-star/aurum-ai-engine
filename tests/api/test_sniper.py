@@ -51,9 +51,11 @@ class _FakeStore:
 class _FakeNotifier:
     def __init__(self) -> None:
         self.sent: list = []
+        self.sent_post_ids: list = []
 
-    async def send_analysis_alert(self, payload) -> bool:
+    async def send_analysis_alert(self, payload, post_id=None) -> bool:
         self.sent.append(payload)
+        self.sent_post_ids.append(post_id)
         return True
 
 
@@ -124,8 +126,9 @@ def test_valid_alert_persists_and_broadcasts(wired):
     assert row["symbol"] == "XAUUSD"
     assert row["bias"] == "bullish"
 
-    # Telegram notified.
+    # Telegram notified, with the persisted post id for the /room deep link.
     assert len(notifier.sent) == 1
+    assert notifier.sent_post_ids == ["post-123"]
 
 
 def test_vocab_normalization_buy_to_bullish(wired):
