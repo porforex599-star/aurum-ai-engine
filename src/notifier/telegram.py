@@ -331,6 +331,11 @@ def format_analysis_message(payload: "SniperAlertPayload") -> str:
             f"{_esc(z.id)}@{_fmt_price(z.price)}" for z in payload.target_zones
         )
         lines.append(f"🎯 Targets: {zones}")
+    # Phase 4 chart-context counts — only shown when the alert carries them.
+    if payload.pattern_markers:
+        lines.append(f"🎯 Patterns: {len(payload.pattern_markers)}")
+    if payload.sd_zones:
+        lines.append(f"📦 Zones: {len(payload.sd_zones)}")
     lines.append(
         f"{_RISK_EMOJI.get(risk, '')} Risk: {_esc(risk)} · "
         f"Confidence: {_esc(payload.confidence)}%"
