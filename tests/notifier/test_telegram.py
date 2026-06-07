@@ -425,6 +425,23 @@ def test_format_analysis_message_renders_fields() -> None:
     assert "ทดสอบ" in msg
 
 
+def test_format_analysis_message_renders_invalidation_and_rr_when_present() -> None:
+    msg = format_analysis_message(
+        _analysis_payload(invalidation_price=2330.5, rr_ratio=2.8)
+    )
+    assert "Invalidation" in msg
+    assert "2,330.50" in msg or "2330.50" in msg
+    assert "R:R" in msg
+    assert "2.8" in msg
+
+
+def test_format_analysis_message_omits_invalidation_and_rr_when_absent() -> None:
+    msg = format_analysis_message(_analysis_payload())
+    assert "Invalidation" not in msg
+    assert "R:R" not in msg
+    assert "N/A" not in msg
+
+
 @pytest.mark.asyncio
 async def test_send_analysis_alert_happy_path() -> None:
     fake = _FakeClient(_FakeResponse(200))

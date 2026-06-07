@@ -319,6 +319,13 @@ def format_analysis_message(payload: "SniperAlertPayload") -> str:
         f"{_BIAS_EMOJI.get(bias, '🎯')} Bias: <b>{_esc(bias.upper())}</b>",
         f"📍 Key level: <code>{_fmt_price(payload.key_level)}</code>",
     ]
+    # Optional risk-context lines — only rendered when provided (no "N/A").
+    if payload.invalidation_price is not None:
+        lines.append(
+            f"🛑 Invalidation: <code>{_fmt_price(payload.invalidation_price)}</code>"
+        )
+    if payload.rr_ratio is not None:
+        lines.append(f"⚖️ R:R: <b>1:{_esc(format(payload.rr_ratio, 'g'))}</b>")
     if payload.target_zones:
         zones = "  ".join(
             f"{_esc(z.id)}@{_fmt_price(z.price)}" for z in payload.target_zones

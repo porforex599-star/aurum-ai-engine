@@ -163,3 +163,40 @@ def test_notification_failure_does_not_fail_request(wired):
     response = client.post(ENDPOINT, json=VALID_PAYLOAD, headers={"X-Webhook-Secret": SECRET})
     assert response.status_code == 200
     assert len(store.rows) == 1
+
+
+def test_webhook_accepts_invalidation_and_rr_fields(wired):
+    """invalidation_price and rr_ratio are accepted and persisted when provided."""
+    client, store, notifier = wired
+    payload = {**VALID_PAYLOAD, "invalidation_price": 2330.5, "rr_ratio": 2.8}
+    response = client.post(ENDPOINT, json=payload, headers={"X-Webhook-Secret": SECRET})
+
+    assert response.status_code == 200
+    assert len(store.rows) == 1
+    _, row = store.rows[0]
+    assert row["invalidation_price"] == 2330.5
+    assert row["rr_ratio"] == 2.8
+
+    # The validated payload handed to the notifier carries the new fields too.
+    assert notifier.sent[0].invalidation_price == 2330.5
+    assert notifier.sent[0].rr_ratio == 2.8
+
+
+def test_webhook_backward_compat_without_new_fields(wired):
+    """Phase 3 callers that omit the new fields still succeed.
+
+    The fields default to None and are dropped from the persisted row
+    (to_post_row uses exclude_none), so DB column defaults still apply.
+    """
+    client, store, notifier = wired
+    response = client.post(ENDPOINT, json=VALID_PAYLOAD, headers={"X-Webhook-Secret": SECRET})
+
+    assert response.status_code == 200
+    assert len(store.rows) == 1
+    _, row = store.rows[0]
+    assert "invalidation_price" not in row
+    assert "rr_ratio" not in row
+
+    # Defaults are None on the parsed payload.
+    assert notifier.sent[0].invalidation_price is None
+    assert notifier.sent[0].rr_ratio is None
