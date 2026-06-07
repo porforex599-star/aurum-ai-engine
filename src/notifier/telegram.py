@@ -30,6 +30,9 @@ if TYPE_CHECKING:
 
 _API_BASE = "https://api.telegram.org"
 
+# Public /room base — members tap the deep link to open the live chart for a post.
+_ROOM_BASE_URL = "https://aurum-signals-ecru.vercel.app"
+
 # Per-kind emoji prefixes for at-a-glance scanning.
 _KIND_EMOJI: dict[str, str] = {
     "open": "🟢",
@@ -310,8 +313,14 @@ _BIAS_EMOJI: dict[str, str] = {"bullish": "🟢", "bearish": "🔴"}
 _RISK_EMOJI: dict[str, str] = {"low": "🟢", "medium": "🟡", "high": "🔴"}
 
 
-def format_analysis_message(payload: "SniperAlertPayload") -> str:
-    """Render an Aurum Sniper analysis post as an HTML-parsed Telegram message."""
+def format_analysis_message(
+    payload: "SniperAlertPayload", post_id: str | None = None
+) -> str:
+    """Render an Aurum Sniper analysis post as an HTML-parsed Telegram message.
+
+    When ``post_id`` is provided, a deep link to that post's live chart in
+    ``/room`` is rendered just above the Phase 4 chart-context counts.
+    """
     bias = str(payload.bias)
     risk = str(payload.risk_level)
     lines = [
@@ -331,6 +340,11 @@ def format_analysis_message(payload: "SniperAlertPayload") -> str:
             f"{_esc(z.id)}@{_fmt_price(z.price)}" for z in payload.target_zones
         )
         lines.append(f"🎯 Targets: {zones}")
+    # Phase 4b deep link — jump straight to this post's live chart in /room.
+    if post_id is not None:
+        lines.append(
+            f"🔗 ดู chart สดๆ: {_ROOM_BASE_URL}/room?post_id={_esc(post_id)}"
+        )
     # Phase 4 chart-context counts — only shown when the alert carries them.
     if payload.pattern_markers:
         lines.append(f"🎯 Patterns: {len(payload.pattern_markers)}")
@@ -423,18 +437,21 @@ class TelegramNotifier:
             return False
         return True
 
-    async def send_analysis_alert(self, payload: "SniperAlertPayload") -> bool:
+    async def send_analysis_alert(
+        self, payload: "SniperAlertPayload", post_id: str | None = None
+    ) -> bool:
         """Send an Aurum Sniper analysis post to Telegram.
 
         Mirrors notify(): never raises, returns False when disabled or on any
         network/HTTP error. Independent of the per-tick intent skip-kind filter.
+        When ``post_id`` is given, the message includes a /room deep link.
         """
         if not self._enabled:
             return False
         url = f"{self._api_base}/bot{self._token}/sendMessage"
         body = {
             "chat_id": self._chat_id,
-            "text": format_analysis_message(payload),
+            "text": format_analysis_message(payload, post_id),
             "parse_mode": "HTML",
             "disable_web_page_preview": True,
         }

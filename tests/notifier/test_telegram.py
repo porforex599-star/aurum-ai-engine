@@ -466,6 +466,32 @@ def test_format_analysis_message_omits_phase4_counts_when_absent() -> None:
     assert "Zones:" not in msg
 
 
+def test_format_analysis_message_renders_deeplink_when_post_id_present() -> None:
+    msg = format_analysis_message(_analysis_payload(), post_id="abc-123")
+    assert (
+        "🔗 ดู chart สดๆ: https://aurum-signals-ecru.vercel.app/room?post_id=abc-123"
+        in msg
+    )
+
+
+def test_format_analysis_message_deeplink_precedes_phase4_counts() -> None:
+    msg = format_analysis_message(
+        _analysis_payload(
+            pattern_markers=[{"time": 1717689600, "kind": "3ls_bull", "price": 2346.0}],
+            sd_zones=[{"tf": "2H", "type": "demand", "high": 2344.0, "low": 2340.0}],
+        ),
+        post_id="abc-123",
+    )
+    assert msg.index("🔗 ดู chart สดๆ") < msg.index("Patterns:")
+    assert msg.index("🔗 ดู chart สดๆ") < msg.index("Zones:")
+
+
+def test_format_analysis_message_omits_deeplink_when_post_id_absent() -> None:
+    msg = format_analysis_message(_analysis_payload())
+    assert "🔗" not in msg
+    assert "/room?post_id=" not in msg
+
+
 @pytest.mark.asyncio
 async def test_send_analysis_alert_happy_path() -> None:
     fake = _FakeClient(_FakeResponse(200))
@@ -476,6 +502,15 @@ async def test_send_analysis_alert_happy_path() -> None:
     assert "/bott/sendMessage" in fake.last_url
     assert fake.last_body["parse_mode"] == "HTML"
     assert fake.last_body["chat_id"] == "123"
+
+
+@pytest.mark.asyncio
+async def test_send_analysis_alert_includes_deeplink_with_post_id() -> None:
+    fake = _FakeClient(_FakeResponse(200))
+    n = TelegramNotifier(token="t", chat_id="123", enabled=True, client=fake)
+    ok = await n.send_analysis_alert(_analysis_payload(), post_id="post-42")
+    assert ok is True
+    assert "/room?post_id=post-42" in fake.last_body["text"]
 
 
 @pytest.mark.asyncio

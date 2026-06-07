@@ -107,6 +107,6 @@ async def aurum_sniper_alert(
 
     # 4. Notify Telegram (best-effort; never fails the request).
     if notifier is not None:
-        await notifier.send_analysis_alert(payload)
+        await notifier.send_analysis_alert(payload, post_id=str(post_id))
 
     return SniperAlertResponse(post_id=str(post_id), broadcast=True)
