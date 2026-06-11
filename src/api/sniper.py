@@ -9,6 +9,7 @@ Supabase Realtime broadcasts to subscribed `/room` clients via
 from __future__ import annotations
 
 import secrets
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from loguru import logger
@@ -18,8 +19,61 @@ from src.core.supabase_client import SupabaseClient, get_customers_client
 from src.engine.runtime import get_runtime
 from src.notifier.telegram import TelegramNotifier
 from src.schemas.sniper import SniperAlertPayload, SniperAlertResponse
+from src.services.chart_img import capture_layout_snapshot
+from src.services.snapshot_storage import upload_snapshot
 
 router = APIRouter()
+
+
+def _timeframe_to_chartimg_interval(tf: str) -> str:
+    """Pine timeframe → chart-img interval string (default 15m)."""
+    mapping = {
+        "M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m",
+        "H1": "1h", "H4": "4h", "D1": "1D", "W1": "1W",
+        "1": "1m", "5": "5m", "15": "15m", "30": "30m",
+        "60": "1h", "240": "4h", "D": "1D", "W": "1W",
+    }
+    return mapping.get(str(tf).upper(), "15m")
+
+
+async def _attach_chart_snapshot(
+    store: SupabaseClient, payload: SniperAlertPayload, post_id: str
+) -> None:
+    """Capture a TV snapshot → upload to Storage → UPDATE chart_image_url.
+
+    Best-effort: each step is graceful and returns early on failure, so a
+    missing snapshot never blocks the post that was already persisted and
+    broadcast. The Realtime UPDATE re-broadcasts the row so /room can render
+    the <img> once the chart is ready.
+    """
+    tv_symbol = payload.symbol if ":" in payload.symbol else f"OANDA:{payload.symbol}"
+    interval = _timeframe_to_chartimg_interval(payload.timeframe)
+
+    png_bytes = await capture_layout_snapshot(symbol=tv_symbol, interval=interval)
+    if not png_bytes:
+        return
+
+    public_url = await upload_snapshot(store, post_id, png_bytes)
+    if not public_url:
+        return
+
+    try:
+        await store.update_row(
+            get_settings().ANALYSIS_TABLE,
+            {
+                "chart_image_url": public_url,
+                "chart_image_generated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            match={"id": post_id},
+        )
+        logger.info("Attached chart snapshot to post {} ({})", post_id, public_url)
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "update analysis_posts.chart_image_url failed: post_id={} exc={}: {}",
+            post_id,
+            type(exc).__name__,
+            str(exc)[:200],
+        )
 
 
 def get_analysis_store() -> SupabaseClient:
@@ -108,5 +162,19 @@ async def aurum_sniper_alert(
     # 4. Notify Telegram (best-effort; never fails the request).
     if notifier is not None:
         await notifier.send_analysis_alert(payload, post_id=str(post_id))
+
+    # 5. Capture chart snapshot → Storage → UPDATE chart_image_url (Phase 5a).
+    #    Runs after the notify so the Realtime INSERT broadcast and Telegram
+    #    alert are already out before the up-to-25s capture. Fully graceful —
+    #    any failure here must never turn the persisted post into a 5xx.
+    try:
+        await _attach_chart_snapshot(store, payload, str(post_id))
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "chart snapshot pipeline failed: post_id={} exc={}: {}",
+            post_id,
+            type(exc).__name__,
+            str(exc)[:200],
+        )
 
     return SniperAlertResponse(post_id=str(post_id), broadcast=True)

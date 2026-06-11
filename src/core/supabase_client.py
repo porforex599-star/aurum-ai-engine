@@ -70,6 +70,53 @@ class SupabaseClient:
         data = await asyncio.to_thread(_insert)
         return data[0] if data else {}
 
+    async def update_row(self, table: str, values: dict, *, match: dict) -> dict:
+        """Update rows matching ``match`` (column → value) and return the first.
+
+        Like ``insert_row``, the synchronous postgrest call runs in a worker
+        thread so it never blocks the event loop.
+        """
+        if self._client is None:
+            raise RuntimeError("Supabase client is not initialized")
+
+        def _update() -> list[dict]:
+            query = self._client.table(table).update(values)
+            for column, value in match.items():
+                query = query.eq(column, value)
+            return query.execute().data or []
+
+        data = await asyncio.to_thread(_update)
+        return data[0] if data else {}
+
+    async def upload_to_storage(
+        self,
+        bucket: str,
+        path: str,
+        data: bytes,
+        *,
+        content_type: str,
+        upsert: bool = True,
+    ) -> None:
+        """Upload ``data`` to a Storage bucket (sync call offloaded to a thread)."""
+        if self._client is None:
+            raise RuntimeError("Supabase client is not initialized")
+
+        def _upload() -> None:
+            self._client.storage.from_(bucket).upload(
+                path,
+                data,
+                file_options={
+                    "content-type": content_type,
+                    "upsert": "true" if upsert else "false",
+                },
+            )
+
+        await asyncio.to_thread(_upload)
+
+    def storage_public_url(self, bucket: str, path: str) -> str:
+        """Construct the public object URL for a Storage bucket path."""
+        return f"{self._url.rstrip('/')}/storage/v1/object/public/{bucket}/{path}"
+
     async def shutdown(self) -> None:
         self._client = None
         self._connected = False

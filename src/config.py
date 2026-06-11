@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     AURUM_SNIPER_WEBHOOK_SECRET: str = Field(default="")
     ANALYSIS_TABLE: str = Field(default="analysis_posts")
 
+    # Phase 5a — chart-img.com snapshot. When unset, the snapshot pipeline is
+    # skipped gracefully (webhook persist + broadcast + Telegram still run).
+    CHARTIMG_API_KEY: str = Field(default="")
+    TV_LAYOUT_ID: str = Field(default="")
+
 
 _settings: Settings | None = None
 
