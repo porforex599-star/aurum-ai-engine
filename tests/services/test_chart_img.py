@@ -73,10 +73,10 @@ async def test_capture_returns_bytes_on_200(monkeypatch):
 
     assert result == PNG
     call = captured["client"].calls[0]
-    assert call["url"].endswith("/tradingview/layout-chart")
+    # Layout id lives in the URL path; it must not appear in the body.
+    assert call["url"].endswith("/tradingview/layout-chart/test-layout")
     assert call["headers"]["x-api-key"] == "test-key"
     assert call["json"] == {
-        "layout": "test-layout",
         "symbol": "OANDA:XAUUSD",
         "interval": "5m",
         "width": 1920,
