@@ -20,7 +20,7 @@ CHARTIMG_BASE = "https://api.chart-img.com/v2"
 async def capture_layout_snapshot(
     symbol: str,
     interval: str,
-    timeout: float = 25.0,
+    timeout: float = 60.0,
 ) -> bytes | None:
     """Capture a TradingView layout snapshot → PNG bytes. ``None`` on failure.
 
@@ -41,13 +41,14 @@ async def capture_layout_snapshot(
         )
         return None
 
-    url = f"{CHARTIMG_BASE}/tradingview/layout-chart"
+    # chart-img.com Shared Layout endpoint: the layout id goes in the URL path
+    # (POST /v2/tradingview/layout-chart/<LAYOUT_ID>), not the request body.
+    url = f"{CHARTIMG_BASE}/tradingview/layout-chart/{layout_id}"
     headers = {
         "x-api-key": api_key,
         "content-type": "application/json",
     }
     payload = {
-        "layout": layout_id,
         "symbol": symbol,
         "interval": interval,
         "width": 1920,
