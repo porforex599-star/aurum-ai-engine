@@ -16,6 +16,41 @@ from src.config import get_settings
 
 CHARTIMG_BASE = "https://api.chart-img.com/v2"
 
+# chart-img layout-chart intervals (case-sensitive: "1m"=minute vs "1M"=month).
+_CHARTIMG_INTERVALS = {
+    "1m", "3m", "5m", "15m", "30m", "45m",
+    "1h", "2h", "3h", "4h",
+    "1D", "1W", "1M",
+}
+
+# TradingView / Pine vocab → chart-img interval. Covers Pine "M5"/"H4" style
+# and the numeric resolution style ("5", "240") emitted by alerts and the
+# admin test-capture body.
+_TF_ALIASES = {
+    "M1": "1m", "M3": "3m", "M5": "5m", "M15": "15m", "M30": "30m", "M45": "45m",
+    "H1": "1h", "H2": "2h", "H3": "3h", "H4": "4h",
+    "D1": "1D", "W1": "1W", "MN1": "1M",
+    "1": "1m", "3": "3m", "5": "5m", "15": "15m", "30": "30m", "45": "45m",
+    "60": "1h", "120": "2h", "180": "3h", "240": "4h",
+    "D": "1D", "W": "1W", "M": "1M",
+}
+
+
+def normalize_interval(tf: str) -> str:
+    """Normalize any TV/Pine timeframe to a chart-img interval (default ``15m``).
+
+    Idempotent: an already-valid chart-img interval (e.g. ``"5m"``) passes
+    through unchanged, so it's safe to call even on values that another layer
+    has already mapped. This is the single source of truth for the chart-img
+    interval vocabulary — both the Sniper webhook and the admin test-capture
+    endpoint go through it, so a raw ``"5"`` never reaches chart-img as ``"5"``
+    (which the API rejects with HTTP 422).
+    """
+    s = str(tf).strip()
+    if s in _CHARTIMG_INTERVALS:
+        return s
+    return _TF_ALIASES.get(s.upper(), "15m")
+
 
 async def capture_layout_snapshot(
     symbol: str,
@@ -32,10 +67,14 @@ async def capture_layout_snapshot(
     ``layout_id`` overrides the configured ``TV_LAYOUT_ID`` for the call, letting
     callers (e.g. the admin test-capture endpoint) target an arbitrary shared
     layout without changing global config.
+
+    ``interval`` is normalized to chart-img's vocabulary via
+    :func:`normalize_interval`, so callers may pass any TV/Pine style value.
     """
     settings = get_settings()
     api_key = settings.CHARTIMG_API_KEY
     layout_id = layout_id or settings.TV_LAYOUT_ID
+    interval = normalize_interval(interval)
 
     if not api_key or not layout_id:
         logger.warning(
@@ -64,6 +103,21 @@ async def capture_layout_snapshot(
             resp = await client.post(url, headers=headers, json=payload)
             resp.raise_for_status()
             return resp.content
+    except httpx.HTTPStatusError as exc:
+        # Surface chart-img's own validation message (it explains *which* field
+        # the request got wrong) instead of just the generic status line.
+        resp = exc.response
+        logger.warning(
+            "chart_img.capture failed: status={} body={} symbol={} interval={} "
+            "exc={}: {}",
+            resp.status_code,
+            resp.text[:1000],
+            symbol,
+            interval,
+            type(exc).__name__,
+            str(exc)[:200],
+        )
+        return None
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "chart_img.capture failed: symbol={} interval={} exc={}: {}",

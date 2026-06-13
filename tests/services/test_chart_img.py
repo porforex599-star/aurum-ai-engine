@@ -108,3 +108,86 @@ async def test_capture_returns_none_when_not_configured(monkeypatch):
 
     result = await chart_img.capture_layout_snapshot(symbol="OANDA:XAUUSD", interval="5m")
     assert result is None
+
+
+# -------------------- interval normalization (422 root-cause guard) --------------------
+
+
+@pytest.mark.parametrize(
+    "raw, expected",
+    [
+        ("5", "5m"),      # raw numeric resolution (the admin-body default that caused 422)
+        ("15", "15m"),
+        ("60", "1h"),
+        ("240", "4h"),
+        ("M5", "5m"),     # Pine style
+        ("H4", "4h"),
+        ("D1", "1D"),
+        ("D", "1D"),
+        ("5m", "5m"),     # already-valid chart-img interval → idempotent passthrough
+        ("1h", "1h"),
+        ("1D", "1D"),
+        ("1m", "1m"),     # minute vs month case-sensitivity preserved
+        ("1M", "1M"),
+        ("bogus", "15m"),  # unknown → safe default
+    ],
+)
+def test_normalize_interval(raw, expected):
+    assert chart_img.normalize_interval(raw) == expected
+
+
+async def test_capture_normalizes_raw_interval_in_request_body(monkeypatch):
+    """Regression: a raw "5" must reach chart-img as "5m", not "5" (HTTP 422)."""
+    captured = {}
+
+    def _factory(**kwargs):
+        client = _FakeAsyncClient(response=_FakeResponse(200, PNG), **kwargs)
+        captured["client"] = client
+        return client
+
+    monkeypatch.setattr(chart_img.httpx, "AsyncClient", _factory)
+
+    result = await chart_img.capture_layout_snapshot(
+        symbol="OANDA:XAUUSD", interval="5", layout_id="uoSX32t7"
+    )
+
+    assert result == PNG
+    call = captured["client"].calls[0]
+    assert call["url"].endswith("/tradingview/layout-chart/uoSX32t7")
+    # Exactly the body the Sniper webhook sends — interval normalized to "5m".
+    assert call["json"] == {
+        "symbol": "OANDA:XAUUSD",
+        "interval": "5m",
+        "width": 1920,
+        "height": 1080,
+    }
+
+
+async def test_capture_logs_chartimg_body_on_http_error(monkeypatch):
+    """On a 4xx, chart-img's validation message is logged for debugging."""
+    import io
+
+    request = httpx.Request("POST", "https://api.chart-img.com/v2/x")
+    response = httpx.Response(
+        422, request=request, text='{"error":"interval is invalid"}'
+    )
+    err = httpx.HTTPStatusError("422", request=request, response=response)
+
+    def _factory(**kwargs):
+        return _FakeAsyncClient(raise_exc=err, **kwargs)
+
+    monkeypatch.setattr(chart_img.httpx, "AsyncClient", _factory)
+
+    sink = io.StringIO()
+    handler_id = chart_img.logger.add(sink, format="{message}")
+    try:
+        result = await chart_img.capture_layout_snapshot(
+            symbol="OANDA:XAUUSD", interval="5"
+        )
+    finally:
+        chart_img.logger.remove(handler_id)
+
+    assert result is None
+    logged = sink.getvalue()
+    assert "status=422" in logged
+    assert "interval is invalid" in logged
