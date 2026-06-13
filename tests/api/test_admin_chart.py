@@ -187,3 +187,67 @@ def test_returns_502_when_upload_fails(wired, monkeypatch) -> None:
     r = client.post(ENDPOINT, headers=_HDR, json={})
     assert r.status_code == 502
     assert store.updates == []
+
+
+# -------------------- end-to-end chart-img body guard (422 regression) --------
+
+
+class _FakeHTTPResponse:
+    def __init__(self, content: bytes) -> None:
+        self.status_code = 200
+        self.content = content
+
+    def raise_for_status(self) -> None:  # pragma: no cover - 200 path
+        return None
+
+
+class _FakeHTTPClient:
+    """httpx.AsyncClient stand-in that records the chart-img request body."""
+
+    posted: dict = {}
+
+    def __init__(self, **_k) -> None:
+        pass
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None):
+        _FakeHTTPClient.posted = {"url": url, "headers": headers, "json": json}
+        return _FakeHTTPResponse(PNG)
+
+
+def test_endpoint_sends_chartimg_accepted_body(monkeypatch):
+    """Regression for the 422: the admin default interval "5" must reach
+    chart-img as the normalized "5m" body — identical to what the Sniper
+    webhook sends — not the raw "5" the API rejects."""
+    from src.services import chart_img
+
+    monkeypatch.setenv("ADMIN_KEY", ADMIN_KEY)
+    monkeypatch.setenv("CHARTIMG_API_KEY", "test-key")
+    monkeypatch.setenv("TV_LAYOUT_ID", "fallback-layout")
+    reset_settings()
+    # Do NOT mock capture_layout_snapshot — let it build the real chart-img body.
+    monkeypatch.setattr(chart_img.httpx, "AsyncClient", _FakeHTTPClient)
+
+    store = _FakeStore()
+    app.dependency_overrides[get_chart_store] = lambda: store
+    try:
+        r = TestClient(app).post(ENDPOINT, headers=_HDR, json={})
+        assert r.status_code == 200
+    finally:
+        app.dependency_overrides.pop(get_chart_store, None)
+        reset_settings()
+
+    body = _FakeHTTPClient.posted["json"]
+    assert body == {
+        "symbol": "OANDA:XAUUSD",
+        "interval": "5m",
+        "width": 1920,
+        "height": 1080,
+    }
+    # body_id from the request body (uoSX32t7), not the env fallback.
+    assert _FakeHTTPClient.posted["url"].endswith("/tradingview/layout-chart/uoSX32t7")

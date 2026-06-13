@@ -19,21 +19,19 @@ from src.core.supabase_client import SupabaseClient, get_customers_client
 from src.engine.runtime import get_runtime
 from src.notifier.telegram import TelegramNotifier
 from src.schemas.sniper import SniperAlertPayload, SniperAlertResponse
-from src.services.chart_img import capture_layout_snapshot
+from src.services.chart_img import capture_layout_snapshot, normalize_interval
 from src.services.snapshot_storage import upload_snapshot
 
 router = APIRouter()
 
 
 def _timeframe_to_chartimg_interval(tf: str) -> str:
-    """Pine timeframe → chart-img interval string (default 15m)."""
-    mapping = {
-        "M1": "1m", "M5": "5m", "M15": "15m", "M30": "30m",
-        "H1": "1h", "H4": "4h", "D1": "1D", "W1": "1W",
-        "1": "1m", "5": "5m", "15": "15m", "30": "30m",
-        "60": "1h", "240": "4h", "D": "1D", "W": "1W",
-    }
-    return mapping.get(str(tf).upper(), "15m")
+    """Pine timeframe → chart-img interval string (default 15m).
+
+    Thin wrapper over the shared :func:`normalize_interval` so the chart-img
+    interval vocabulary lives in exactly one place.
+    """
+    return normalize_interval(tf)
 
 
 async def _attach_chart_snapshot(
