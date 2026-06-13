@@ -14,11 +14,11 @@ import os
 import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from loguru import logger
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.config import get_settings
 from src.core.supabase_client import SupabaseClient, get_customers_client
@@ -29,6 +29,10 @@ from src.services.chart_img import capture_layout_snapshot
 from src.services.snapshot_storage import upload_snapshot_to_path
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+# Public /room feed (aurum-signals) — returned so an admin can jump straight to
+# the published post after a manual publish.
+ROOM_URL = "https://aurum-signals-ecru.vercel.app/room"
 
 # Slugs the dashboard can target. A position is attributed to a product by
 # symbol membership + the AURUM_AI strategy comment (no magic numbers exist).
@@ -63,6 +67,28 @@ class TestCaptureBody(BaseModel):
     symbol: str = "OANDA:XAUUSD"
     interval: str = "5"
     post_id: str | None = None
+
+
+class PublishAnalysisBody(BaseModel):
+    """Request body for an admin manual analysis publish to /room.
+
+    ``symbol``/``timeframe`` are display strings (what /room renders);
+    ``chart_symbol``/``chart_interval``/``layout_id`` drive the chart-img
+    capture. ``direction`` maps to the ``bias`` column and ``conviction``
+    (3-5 stars) maps to ``confidence`` as a percentage (conviction * 20).
+    """
+
+    symbol: str = "XAUUSD"
+    timeframe: str = "M5"
+    direction: Literal["bull", "bear"]
+    conviction: int = Field(..., ge=3, le=5)
+    layout_id: str = "uoSX32t7"
+    chart_symbol: str = "OANDA:XAUUSD"
+    chart_interval: str = "5"
+    # analysis_posts has these NOT NULL; expose them so an admin can override
+    # the sensible defaults when relevant.
+    key_level: float = 0.0
+    risk_level: Literal["low", "medium", "high"] = "medium"
 
 
 def get_chart_store() -> SupabaseClient:
@@ -397,4 +423,111 @@ async def test_capture_chart(
         "storage_path": storage_path,
         "latency_ms": latency_ms,
         "post_id_updated": post_id_updated,
+    }
+
+
+# -------------------- manual analysis publish to /room --------------------
+
+
+@router.post("/analysis/publish", tags=["Admin"])
+async def publish_analysis(
+    body: PublishAnalysisBody,
+    store: SupabaseClient = Depends(get_chart_store),
+    _: None = Depends(_verify_admin_key),
+) -> dict:
+    """Manually publish a new analysis post to /room.
+
+    Mirrors the Sniper webhook's persist→capture→update flow (reusing the same
+    chart-img + storage helpers) so an admin can publish without a Pine alert:
+
+    1. INSERT a row into ``analysis_posts`` (``source='admin_manual'``,
+       ``chart_image_url`` NULL) — Supabase Realtime broadcasts it to /room.
+    2. Capture the TradingView layout → upload ``{post_id}.png`` to Storage.
+    3. UPDATE ``chart_image_url`` so /room re-renders with the chart.
+
+    The chart step is best-effort: if capture/upload fails the post is still
+    published (chart_image_url stays NULL) and the endpoint returns 200, matching
+    the webhook's resilience — the post is already live on /room.
+    """
+    table = get_settings().ANALYSIS_TABLE
+    bias = "bullish" if body.direction == "bull" else "bearish"
+
+    row = {
+        "symbol": body.symbol,
+        "timeframe": body.timeframe,
+        "bias": bias,
+        "key_level": body.key_level,
+        "risk_level": body.risk_level,
+        "confidence": body.conviction * 20,  # 3-5 stars → 60/80/100%
+        "source": "admin_manual",
+    }
+    try:
+        inserted = await store.insert_row(table, row)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("admin publish insert failed: {}", exc)
+        raise HTTPException(
+            status_code=502, detail="failed to insert analysis post"
+        ) from exc
+
+    post_id = inserted.get("id")
+    if post_id is None:
+        logger.error("admin publish insert returned no id: {}", inserted)
+        raise HTTPException(status_code=502, detail="insert returned no post id")
+    post_id = str(post_id)
+
+    # Capture chart → upload → UPDATE chart_image_url (best-effort).
+    started = time.perf_counter()
+    chart_image_url: str | None = None
+    png_bytes = await capture_layout_snapshot(
+        symbol=body.chart_symbol,
+        interval=body.chart_interval,
+        layout_id=body.layout_id,
+    )
+    if png_bytes:
+        chart_image_url = await upload_snapshot_to_path(
+            store, f"{post_id}.png", png_bytes
+        )
+    latency_ms = round((time.perf_counter() - started) * 1000)
+
+    if chart_image_url:
+        try:
+            await store.update_row(
+                table,
+                {
+                    "chart_image_url": chart_image_url,
+                    "chart_image_generated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                match={"id": post_id},
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "admin publish update chart_image_url failed: post_id={} exc={}: {}",
+                post_id,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            chart_image_url = None
+    else:
+        logger.warning(
+            "admin publish: chart capture/upload failed for post {} — "
+            "published without chart_image_url",
+            post_id,
+        )
+
+    logger.info(
+        "admin publish: post_id={} symbol={} bias={} conviction={} latency_ms={} "
+        "chart={}",
+        post_id,
+        body.symbol,
+        bias,
+        body.conviction,
+        latency_ms,
+        bool(chart_image_url),
+    )
+
+    return {
+        "post_id": post_id,
+        "chart_image_url": chart_image_url,
+        "latency_ms": latency_ms,
+        "room_url": ROOM_URL,
     }
