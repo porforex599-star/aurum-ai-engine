@@ -15,16 +15,16 @@ from src.core.supabase_client import SupabaseClient
 BUCKET = "analysis-snapshots"
 
 
-async def upload_snapshot(
+async def upload_snapshot_to_path(
     store: SupabaseClient,
-    post_id: str,
+    file_path: str,
     png_bytes: bytes,
 ) -> str | None:
-    """Upload ``{post_id}.png`` → return its public URL. ``None`` on failure.
+    """Upload ``png_bytes`` to ``file_path`` in the bucket → public URL.
 
-    Uses upsert so retries overwrite any partial/previous object for the post.
+    ``None`` on failure. Uses upsert so retries overwrite any partial/previous
+    object at the same path.
     """
-    file_path = f"{post_id}.png"
     try:
         await store.upload_to_storage(
             BUCKET,
@@ -36,9 +36,21 @@ async def upload_snapshot(
         return store.storage_public_url(BUCKET, file_path)
     except Exception as exc:  # noqa: BLE001
         logger.error(
-            "snapshot_storage.upload failed: post_id={} exc={}: {}",
-            post_id,
+            "snapshot_storage.upload failed: path={} exc={}: {}",
+            file_path,
             type(exc).__name__,
             str(exc)[:200],
         )
         return None
+
+
+async def upload_snapshot(
+    store: SupabaseClient,
+    post_id: str,
+    png_bytes: bytes,
+) -> str | None:
+    """Upload ``{post_id}.png`` → return its public URL. ``None`` on failure.
+
+    Uses upsert so retries overwrite any partial/previous object for the post.
+    """
+    return await upload_snapshot_to_path(store, f"{post_id}.png", png_bytes)

@@ -11,6 +11,7 @@ and SL trails still run — that's by design so positions can wind down safely.
 from __future__ import annotations
 
 import os
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -19,9 +20,13 @@ from fastapi import APIRouter, Depends, Header, HTTPException
 from loguru import logger
 from pydantic import BaseModel
 
+from src.config import get_settings
+from src.core.supabase_client import SupabaseClient, get_customers_client
 from src.engine.master_account import is_product_position
 from src.engine.runtime import AppRuntime, get_runtime
 from src.products.models import CloseIntent, IntentKind
+from src.services.chart_img import capture_layout_snapshot
+from src.services.snapshot_storage import upload_snapshot_to_path
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -46,6 +51,24 @@ class FreezeBody(BaseModel):
 class CloseAllBody(BaseModel):
     reason: str | None = None
     by: str | None = None
+
+
+class TestCaptureBody(BaseModel):
+    """Request body for the manual chart-img capture endpoint.
+
+    Defaults target the current Gold Panel V.2 shared layout on 5m XAUUSD.
+    """
+
+    layout_id: str = "uoSX32t7"
+    symbol: str = "OANDA:XAUUSD"
+    interval: str = "5"
+    post_id: str | None = None
+
+
+def get_chart_store() -> SupabaseClient:
+    """Supabase client for the customers project (owns the analysis-snapshots
+    bucket and the ``analysis_posts`` table). Overridable in tests."""
+    return get_customers_client()
 
 
 def _resolve_product(rt: AppRuntime, slug: str):
@@ -288,4 +311,90 @@ async def close_single_position(
         "closed_at": now.isoformat(),
         "closed_by": by,
         **({"error": detail["error"]} if "error" in detail else {}),
+    }
+
+
+# -------------------- chart-img manual capture --------------------
+
+
+@router.post("/chart/test-capture", tags=["Admin"])
+async def test_capture_chart(
+    body: TestCaptureBody,
+    store: SupabaseClient = Depends(get_chart_store),
+    _: None = Depends(_verify_admin_key),
+) -> dict:
+    """Manually trigger a chart-img layout capture → Supabase Storage upload.
+
+    Reuses the same capture/upload helpers as the Aurum Sniper webhook (PR
+    #18/#19). When ``post_id`` is provided the PNG overwrites
+    ``{post_id}.png`` and ``analysis_posts.chart_image_url`` is updated;
+    otherwise it lands under ``test/{utc_iso_timestamp}.png`` and the DB is
+    left untouched. Latency is measured from before the capture call until the
+    upload completes.
+    """
+    started = time.perf_counter()
+
+    png_bytes = await capture_layout_snapshot(
+        symbol=body.symbol,
+        interval=body.interval,
+        layout_id=body.layout_id,
+    )
+    if not png_bytes:
+        raise HTTPException(
+            status_code=502,
+            detail="chart-img capture failed (check CHARTIMG_API_KEY / layout_id)",
+        )
+
+    if body.post_id:
+        storage_path = f"{body.post_id}.png"
+    else:
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        storage_path = f"test/{timestamp}.png"
+
+    public_url = await upload_snapshot_to_path(store, storage_path, png_bytes)
+    if not public_url:
+        raise HTTPException(status_code=502, detail="Supabase Storage upload failed")
+
+    latency_ms = round((time.perf_counter() - started) * 1000)
+
+    post_id_updated: str | None = None
+    if body.post_id:
+        try:
+            await store.update_row(
+                get_settings().ANALYSIS_TABLE,
+                {
+                    "chart_image_url": public_url,
+                    "chart_image_generated_at": datetime.now(timezone.utc).isoformat(),
+                },
+                match={"id": body.post_id},
+            )
+            post_id_updated = body.post_id
+        except Exception as exc:  # noqa: BLE001
+            logger.error(
+                "test-capture update analysis_posts failed: post_id={} exc={}: {}",
+                body.post_id,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            raise HTTPException(
+                status_code=502,
+                detail="chart uploaded but analysis_posts UPDATE failed",
+            ) from exc
+
+    logger.info(
+        "admin test-capture: layout={} symbol={} interval={} path={} latency_ms={} "
+        "post_id_updated={}",
+        body.layout_id,
+        body.symbol,
+        body.interval,
+        storage_path,
+        latency_ms,
+        post_id_updated,
+    )
+
+    return {
+        "chart_image_url": public_url,
+        "storage_path": storage_path,
+        "latency_ms": latency_ms,
+        "post_id_updated": post_id_updated,
     }
