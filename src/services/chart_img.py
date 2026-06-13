@@ -20,6 +20,7 @@ CHARTIMG_BASE = "https://api.chart-img.com/v2"
 async def capture_layout_snapshot(
     symbol: str,
     interval: str,
+    layout_id: str | None = None,
     timeout: float = 60.0,
 ) -> bytes | None:
     """Capture a TradingView layout snapshot → PNG bytes. ``None`` on failure.
@@ -27,10 +28,14 @@ async def capture_layout_snapshot(
     Returns ``None`` (without making a request) when the chart-img credentials
     or layout id are not configured, so the feature degrades gracefully on
     deployments that haven't set CHARTIMG_API_KEY / TV_LAYOUT_ID.
+
+    ``layout_id`` overrides the configured ``TV_LAYOUT_ID`` for the call, letting
+    callers (e.g. the admin test-capture endpoint) target an arbitrary shared
+    layout without changing global config.
     """
     settings = get_settings()
     api_key = settings.CHARTIMG_API_KEY
-    layout_id = settings.TV_LAYOUT_ID
+    layout_id = layout_id or settings.TV_LAYOUT_ID
 
     if not api_key or not layout_id:
         logger.warning(
